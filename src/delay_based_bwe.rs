@@ -14,8 +14,8 @@ use crate::{
         units::{DataRate, DataSize, TimeDelta, Timestamp},
     },
     experiments::FieldTrials,
-    DelayIncreaseDetectorInterface, InterArrivalDelta, TrendlineEstimator,
     remote_bitrate_estimator::{AimdRateControl, RateControlInput},
+    DelayIncreaseDetectorInterface, InterArrivalDelta, TrendlineEstimator,
 };
 
 // WebRTC-Bwe-SeparateAudioPackets

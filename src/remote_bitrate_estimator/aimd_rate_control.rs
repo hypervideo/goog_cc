@@ -14,8 +14,8 @@ use crate::{
         units::{DataRate, DataSize, TimeDelta, Timestamp},
     },
     experiments::FieldTrials,
-    LinkCapacityEstimator,
     remote_bitrate_estimator::BITRATE_WINDOW,
+    LinkCapacityEstimator,
 };
 
 use super::{RateControlInput, CONGESTION_CONTROLLER_MIN_BITRATE};

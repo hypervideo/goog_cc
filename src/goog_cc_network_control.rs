@@ -23,8 +23,8 @@ use crate::{
         units::{DataRate, DataSize, TimeDelta, Timestamp},
     },
     experiments::{FieldTrials, RateControlSettings},
-    AcknowledgedBitrateEstimator,
     remote_bitrate_estimator::CONGESTION_CONTROLLER_MIN_BITRATE,
+    AcknowledgedBitrateEstimator,
 };
 
 use super::{

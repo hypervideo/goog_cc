@@ -33,8 +33,6 @@ mod api;
 pub mod experiments;
 
 // We inline goog_cc modules to avoid goog_cc::goog_cc logging prefix.
-mod pacing;
-mod remote_bitrate_estimator;
 mod acknowledged_bitrate_estimator;
 mod acknowledged_bitrate_estimator_interface;
 mod alr_detector;
@@ -47,8 +45,10 @@ mod inter_arrival_delta;
 mod link_capacity_estimator;
 mod loss_based_bandwidth_estimation;
 mod loss_based_bwe_v2;
+mod pacing;
 mod probe_bitrate_estimator;
 mod probe_controller;
+mod remote_bitrate_estimator;
 mod robust_throughput_estimator;
 mod send_side_bandwidth_estimation;
 mod trendline_estimator;
@@ -75,11 +75,12 @@ pub use api::{network_control, transport, units};
 pub use goog_cc_network_control::{GoogCcConfig, GoogCcNetworkController};
 pub use {
     alr_detector::AlrDetectorConfig, bitrate_estimator::BitrateEstimatorConfig,
-    send_side_bandwidth_estimation::BweLossExperiment,
     delay_based_bwe::BweSeparateAudioPacketsSettings,
-    loss_based_bwe_v2::LossBasedBweV2Config,
+    goog_cc_network_control::SafeResetOnRouteChange,
     loss_based_bandwidth_estimation::LossBasedControlConfig,
-    probe_controller::ProbeControllerConfig,
+    loss_based_bwe_v2::LossBasedBweV2Config, probe_controller::ProbeControllerConfig,
     robust_throughput_estimator::RobustThroughputEstimatorSettings,
-    send_side_bandwidth_estimation::RttBasedBackoffConfig, goog_cc_network_control::SafeResetOnRouteChange, trendline_estimator::TrendlineEstimatorSettings,
+    send_side_bandwidth_estimation::BweLossExperiment,
+    send_side_bandwidth_estimation::RttBasedBackoffConfig,
+    trendline_estimator::TrendlineEstimatorSettings,
 };
