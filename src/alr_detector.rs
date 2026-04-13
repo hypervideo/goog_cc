@@ -8,9 +8,8 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
-use std::time::Instant;
-
 use crate::{experiments::AlrExperimentSettings, pacing::IntervalBudget};
+use web_time::Instant;
 
 #[derive(Clone, Debug)]
 pub struct AlrDetectorConfig {

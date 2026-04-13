@@ -11,6 +11,7 @@ license-file = "LICENSE"
 
 [dependencies]
 tracing = "0.1"
+web-time = "1.1.0"
 
 [dev-dependencies]
 approx = "0.5"
