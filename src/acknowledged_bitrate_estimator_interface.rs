@@ -13,7 +13,7 @@ use crate::api::{
     units::{DataRate, Timestamp},
 };
 
-pub trait AcknowledgedBitrateEstimatorInterface {
+pub trait AcknowledgedBitrateEstimatorInterface: Send {
     fn incoming_packet_feedback(&mut self, packet_feedback: &[PacketResult]);
     fn bitrate(&self) -> Option<DataRate>;
     fn peek_rate(&self) -> Option<DataRate>;
