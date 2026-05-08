@@ -87,12 +87,12 @@ impl Add<TimeDelta> for Timestamp {
 
     fn add(self, delta: TimeDelta) -> Self {
         if self.is_plus_infinity() || delta.is_plus_infinity() {
-            assert!(!self.is_minus_infinity());
-            assert!(!delta.is_minus_infinity());
+            debug_assert!(!self.is_minus_infinity());
+            debug_assert!(!delta.is_minus_infinity());
             return Self::plus_infinity();
         } else if self.is_minus_infinity() || delta.is_minus_infinity() {
-            assert!(!self.is_plus_infinity());
-            assert!(!delta.is_plus_infinity());
+            debug_assert!(!self.is_plus_infinity());
+            debug_assert!(!delta.is_plus_infinity());
             return Self::minus_infinity();
         }
         Timestamp::from_micros(self.us() + delta.us())
@@ -104,12 +104,12 @@ impl Sub<TimeDelta> for Timestamp {
 
     fn sub(self, delta: TimeDelta) -> Self {
         if self.is_plus_infinity() || delta.is_minus_infinity() {
-            assert!(!self.is_minus_infinity());
-            assert!(!delta.is_plus_infinity());
+            debug_assert!(!self.is_minus_infinity());
+            debug_assert!(!delta.is_plus_infinity());
             return Self::plus_infinity();
         } else if self.is_minus_infinity() || delta.is_plus_infinity() {
-            assert!(!self.is_plus_infinity());
-            assert!(!delta.is_minus_infinity());
+            debug_assert!(!self.is_plus_infinity());
+            debug_assert!(!delta.is_minus_infinity());
             return Self::minus_infinity();
         }
         Timestamp::from_micros(self.us() - delta.us())
@@ -121,12 +121,12 @@ impl Sub for Timestamp {
 
     fn sub(self, other: Self) -> TimeDelta {
         if self.is_plus_infinity() || other.is_minus_infinity() {
-            assert!(!self.is_minus_infinity());
-            assert!(!other.is_plus_infinity());
+            debug_assert!(!self.is_minus_infinity());
+            debug_assert!(!other.is_plus_infinity());
             return TimeDelta::plus_infinity();
         } else if self.is_minus_infinity() || other.is_plus_infinity() {
-            assert!(!self.is_plus_infinity());
-            assert!(!other.is_minus_infinity());
+            debug_assert!(!self.is_plus_infinity());
+            debug_assert!(!other.is_minus_infinity());
             return TimeDelta::minus_infinity();
         }
         TimeDelta::from_micros(self.us() - other.us())

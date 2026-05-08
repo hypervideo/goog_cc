@@ -85,7 +85,10 @@ impl ProbeBitrateEstimator {
         packet_feedback: &PacketResult,
     ) -> Option<DataRate> {
         let cluster_id: i32 = packet_feedback.sent_packet.pacing_info.probe_cluster_id;
-        assert_ne!(cluster_id, PacedPacketInfo::NOT_APROBE);
+        debug_assert_ne!(cluster_id, PacedPacketInfo::NOT_APROBE);
+        if cluster_id == PacedPacketInfo::NOT_APROBE {
+            return None;
+        }
 
         self.erase_old_clusters(packet_feedback.receive_time);
 
@@ -108,20 +111,33 @@ impl ProbeBitrateEstimator {
         cluster.size_total += packet_feedback.sent_packet.size;
         cluster.num_probes += 1;
 
-        assert!(
+        debug_assert!(
             packet_feedback
                 .sent_packet
                 .pacing_info
                 .probe_cluster_min_probes
                 > 0
         );
-        assert!(
+        debug_assert!(
             packet_feedback
                 .sent_packet
                 .pacing_info
                 .probe_cluster_min_bytes
                 > 0
         );
+        if packet_feedback
+            .sent_packet
+            .pacing_info
+            .probe_cluster_min_probes
+            <= 0
+            || packet_feedback
+                .sent_packet
+                .pacing_info
+                .probe_cluster_min_bytes
+                <= 0
+        {
+            return None;
+        }
 
         let min_probes: i64 = (packet_feedback
             .sent_packet
@@ -153,14 +169,20 @@ impl ProbeBitrateEstimator {
         // Since the `send_interval` does not include the time it takes to actually
         // send the last packet the size of the last sent packet should not be
         // included when calculating the send bitrate.
-        assert!(cluster.size_total > cluster.size_last_send);
+        debug_assert!(cluster.size_total > cluster.size_last_send);
+        if cluster.size_total <= cluster.size_last_send {
+            return None;
+        }
         let send_size: DataSize = cluster.size_total - cluster.size_last_send;
         let send_rate: DataRate = send_size / send_interval;
 
         // Since the `receive_interval` does not include the time it takes to
         // actually receive the first packet the size of the first received packet
         // should not be included when calculating the receive bitrate.
-        assert!(cluster.size_total > cluster.size_first_receive);
+        debug_assert!(cluster.size_total > cluster.size_first_receive);
+        if cluster.size_total <= cluster.size_first_receive {
+            return None;
+        }
         let receive_size: DataSize = cluster.size_total - cluster.size_first_receive;
         let receive_rate: DataRate = receive_size / receive_interval;
 
@@ -179,7 +201,7 @@ impl ProbeBitrateEstimator {
         // it suggests that we've found the true capacity of the link. In this case,
         // set the target bitrate slightly lower to not immediately overuse.
         if receive_rate < Self::MIN_RATIO_FOR_UNSATURATED_LINK * send_rate {
-            assert!(send_rate > receive_rate);
+            debug_assert!(send_rate > receive_rate);
             res = Self::TARGET_UTILIZATION_FRACTION * receive_rate;
         }
         self.estimated_data_rate = Some(res);

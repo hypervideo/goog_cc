@@ -41,7 +41,7 @@ impl DataSize {
 
     pub const fn microbits(&self) -> i64 {
         const MAX_BEFORE_CONVERSION: i64 = i64::MAX / 8000000;
-        assert!(
+        debug_assert!(
             self.bytes() <= MAX_BEFORE_CONVERSION,
             "size is too large to be expressed in microbits"
         );

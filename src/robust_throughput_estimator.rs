@@ -70,7 +70,10 @@ impl Default for RobustThroughputEstimatorSettings {
 
 impl RobustThroughputEstimatorSettings {
     pub fn validate(&mut self) {
-        assert!(self.enabled);
+        debug_assert!(self.enabled);
+        if !self.enabled {
+            return;
+        }
 
         if self.window_packets < 10 || 1000 < self.window_packets {
             tracing::warn!("Window size must be between 10 and 1000 packets");
@@ -157,7 +160,7 @@ impl RobustThroughputEstimator {
 
 impl AcknowledgedBitrateEstimatorInterface for RobustThroughputEstimator {
     fn incoming_packet_feedback(&mut self, packet_feedback: &[PacketResult]) {
-        //assert!(packet_feedback.is_sorted_by_key(|x| x.receive_time));
+        //debug_assert!(packet_feedback.is_sorted_by_key(|x| x.receive_time));
         for packet in packet_feedback {
             // Ignore packets without valid send or receive times.
             // (This should not happen in production since lost packets are filtered
@@ -287,8 +290,11 @@ impl AcknowledgedBitrateEstimatorInterface for RobustThroughputEstimator {
         // by a burst of delayed packets), don't cause the estimate to drop.
         // This could cause an overestimation, which we guard against by
         // never returning an estimate above the send rate.
-        assert!(first_recv_time.is_finite());
-        assert!(last_recv_time.is_finite());
+        debug_assert!(first_recv_time.is_finite());
+        debug_assert!(last_recv_time.is_finite());
+        if !first_recv_time.is_finite() || !last_recv_time.is_finite() {
+            return None;
+        }
         let mut recv_duration: TimeDelta =
             (last_recv_time - first_recv_time) - largest_recv_gap + second_largest_recv_gap;
         recv_duration = std::cmp::max(recv_duration, TimeDelta::from_millis(1));
@@ -298,8 +304,11 @@ impl AcknowledgedBitrateEstimatorInterface for RobustThroughputEstimator {
             return Some(recv_size / recv_duration);
         }
 
-        assert!(first_send_time.is_finite());
-        assert!(last_send_time.is_finite());
+        debug_assert!(first_send_time.is_finite());
+        debug_assert!(last_send_time.is_finite());
+        if !first_send_time.is_finite() || !last_send_time.is_finite() {
+            return None;
+        }
         let mut send_duration: TimeDelta = last_send_time - first_send_time;
         send_duration = std::cmp::max(send_duration, TimeDelta::from_millis(1));
 

@@ -162,14 +162,14 @@ impl AimdRateControl {
     }
 
     pub fn set_start_bitrate(&mut self, start_bitrate: DataRate) {
-        self.current_bitrate = start_bitrate;
+        self.current_bitrate = self.clamp_bitrate(start_bitrate);
         self.latest_estimated_throughput = self.current_bitrate;
         self.bitrate_is_initialized = true;
     }
 
     pub fn set_min_bitrate(&mut self, min_bitrate: DataRate) {
-        self.min_configured_bitrate = min_bitrate;
-        self.current_bitrate = self.current_bitrate.max(min_bitrate);
+        self.min_configured_bitrate = min_bitrate.max(CONGESTION_CONTROLLER_MIN_BITRATE);
+        self.current_bitrate = self.current_bitrate.max(self.min_configured_bitrate);
     }
 
     /* unused
@@ -229,7 +229,7 @@ impl AimdRateControl {
         // TODO(bugs.webrtc.org/9379): The comment above doesn't match to the code.
         if !self.bitrate_is_initialized {
             const INITIALIZATION_TIME: TimeDelta = TimeDelta::from_seconds(5);
-            assert!(BITRATE_WINDOW <= INITIALIZATION_TIME);
+            debug_assert!(BITRATE_WINDOW <= INITIALIZATION_TIME);
 
             if let Some(estimated_throughput) = input.estimated_throughput {
                 if self.time_first_throughput_estimate.is_infinite() {
@@ -266,7 +266,12 @@ impl AimdRateControl {
 
     // Returns the increase rate when used bandwidth is near the link capacity.
     pub fn get_near_max_increase_rate_bps_per_second(&self) -> f64 {
-        assert!(!self.current_bitrate.is_zero());
+        debug_assert!(!self.current_bitrate.is_zero());
+        const MIN_INCREASE_RATE_BPS_PER_SECOND: f64 = 4000.0;
+        if self.current_bitrate.is_zero() {
+            return MIN_INCREASE_RATE_BPS_PER_SECOND;
+        }
+
         let frame_interval: TimeDelta = TimeDelta::from_seconds_float(1.0 / 30.0);
         let frame_size: DataSize = self.current_bitrate * frame_interval;
         const PACKET_SIZE: DataSize = DataSize::from_bytes(1200);
@@ -278,7 +283,6 @@ impl AimdRateControl {
 
         response_time *= 2;
         let increase_rate_bps_per_second: f64 = (avg_packet_size / response_time).bps_float();
-        const MIN_INCREASE_RATE_BPS_PER_SECOND: f64 = 4000.0;
         increase_rate_bps_per_second.max(MIN_INCREASE_RATE_BPS_PER_SECOND)
     }
     // Returns the expected time between overuse signals (assuming steady state).
@@ -915,5 +919,41 @@ mod test {
             now += TimeDelta::from_millis(100);
         }
         assert!(aimd_rate_control.latest_estimate() > network_estimate.link_capacity_upper);
+    }
+
+    #[test]
+    fn zero_start_bitrate_is_clamped_to_minimum() {
+        let mut aimd_rate_control = AimdRateControl::default();
+        aimd_rate_control.set_min_bitrate(DataRate::zero());
+        aimd_rate_control.set_start_bitrate(DataRate::zero());
+
+        assert_eq!(
+            aimd_rate_control.latest_estimate(),
+            CONGESTION_CONTROLLER_MIN_BITRATE
+        );
+    }
+
+    #[test]
+    fn update_recovers_from_zero_current_bitrate_in_release_builds() {
+        if cfg!(debug_assertions) {
+            return;
+        }
+        let mut aimd_rate_control = AimdRateControl::default();
+        aimd_rate_control.bitrate_is_initialized = true;
+        aimd_rate_control.current_bitrate = DataRate::zero();
+        aimd_rate_control.latest_estimated_throughput = CONGESTION_CONTROLLER_MIN_BITRATE;
+        aimd_rate_control
+            .link_capacity
+            .on_overuse_detected(CONGESTION_CONTROLLER_MIN_BITRATE);
+
+        let estimate = aimd_rate_control.update(
+            RateControlInput::new(
+                BandwidthUsage::Normal,
+                Some(CONGESTION_CONTROLLER_MIN_BITRATE),
+            ),
+            INITIAL_TIME,
+        );
+
+        assert!(estimate >= CONGESTION_CONTROLLER_MIN_BITRATE);
     }
 }

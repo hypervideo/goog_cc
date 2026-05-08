@@ -63,9 +63,9 @@ impl Div<TimeDelta> for i64 {
 
     fn div(self, interval: TimeDelta) -> Frequency {
         const KILO_PER_MICRO: i64 = 1000 * 1000000;
-        assert!(self <= i64::MAX / KILO_PER_MICRO);
-        assert!(interval.is_finite());
-        assert!(!interval.is_zero());
+        debug_assert!(self <= i64::MAX / KILO_PER_MICRO);
+        debug_assert!(interval.is_finite());
+        debug_assert!(!interval.is_zero());
         Frequency::from_milli_hertz(self * KILO_PER_MICRO / interval.us())
     }
 }
@@ -75,9 +75,9 @@ impl Div<Frequency> for i64 {
 
     fn div(self, frequency: Frequency) -> TimeDelta {
         const MEGA_PER_MILLI: i64 = 1000000 * 1000;
-        assert!(self <= i64::MAX / MEGA_PER_MILLI);
-        assert!(frequency.is_finite());
-        assert!(!frequency.is_zero());
+        debug_assert!(self <= i64::MAX / MEGA_PER_MILLI);
+        debug_assert!(frequency.is_finite());
+        debug_assert!(!frequency.is_zero());
         TimeDelta::from_micros(self * MEGA_PER_MILLI / frequency.millihertz())
     }
 }

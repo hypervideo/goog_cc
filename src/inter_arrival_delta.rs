@@ -158,7 +158,10 @@ impl InterArrivalDelta {
     }
 
     fn belongs_to_burst(&self, arrival_time: Timestamp, send_time: Timestamp) -> bool {
-        assert!(self.current_timestamp_group.complete_time.is_finite());
+        debug_assert!(self.current_timestamp_group.complete_time.is_finite());
+        if !self.current_timestamp_group.complete_time.is_finite() {
+            return false;
+        }
         let arrival_time_delta: TimeDelta =
             arrival_time - self.current_timestamp_group.complete_time;
         let send_time_delta: TimeDelta = send_time - self.current_timestamp_group.send_time;

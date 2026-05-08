@@ -102,7 +102,10 @@ impl AlrDetector {
 
     // Set current estimated bandwidth.
     pub fn set_estimated_bitrate(&mut self, bitrate_bps: i64) {
-        assert!(bitrate_bps > 0);
+        debug_assert!(bitrate_bps > 0);
+        if bitrate_bps <= 0 {
+            return;
+        }
         let target_rate_kbps: i64 =
             (bitrate_bps as f64 * self.conf.bandwidth_usage_ratio / 1000.0) as i64;
         self.alr_budget.set_target_rate_kbps(target_rate_kbps);

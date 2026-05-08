@@ -146,7 +146,10 @@ impl DelayIncreaseDetectorInterface for TrendlineEstimator {
 }
 
 fn linear_fit_slope(packets: &VecDeque<PacketTiming>) -> Option<f64> {
-    assert!(packets.len() >= 2);
+    debug_assert!(packets.len() >= 2);
+    if packets.len() < 2 {
+        return None;
+    }
     // Compute the "center of mass".
     let mut sum_x: f64 = 0.0;
     let mut sum_y: f64 = 0.0;
@@ -175,9 +178,17 @@ fn compute_slope_cap(
     packets: &VecDeque<PacketTiming>,
     settings: &TrendlineEstimatorSettings,
 ) -> Option<f64> {
-    assert!(1 <= settings.beginning_packets && settings.beginning_packets < packets.len());
-    assert!(1 <= settings.end_packets && settings.end_packets < packets.len());
-    assert!(settings.beginning_packets + settings.end_packets <= packets.len());
+    debug_assert!(1 <= settings.beginning_packets && settings.beginning_packets < packets.len());
+    debug_assert!(1 <= settings.end_packets && settings.end_packets < packets.len());
+    debug_assert!(settings.beginning_packets + settings.end_packets <= packets.len());
+    if settings.beginning_packets == 0
+        || settings.end_packets == 0
+        || settings.beginning_packets >= packets.len()
+        || settings.end_packets >= packets.len()
+        || settings.beginning_packets + settings.end_packets > packets.len()
+    {
+        return None;
+    }
     let mut early = &packets[0];
     for packet in packets.iter().take(settings.beginning_packets).skip(1) {
         if packet.raw_delay_ms < early.raw_delay_ms {

@@ -512,9 +512,15 @@ impl ProbeController {
         }
     }
     fn initiate_exponential_probing(&mut self, at_time: Timestamp) -> Vec<ProbeClusterConfig> {
-        assert!(self.network_available);
-        assert!(matches!(self.state, State::Init));
-        assert!(self.start_bitrate > DataRate::zero());
+        debug_assert!(self.network_available);
+        debug_assert!(matches!(self.state, State::Init));
+        debug_assert!(self.start_bitrate > DataRate::zero());
+        if !self.network_available
+            || !matches!(self.state, State::Init)
+            || self.start_bitrate <= DataRate::zero()
+        {
+            return vec![];
+        }
 
         // When probing at 1.8 Mbps ( 6x 300), this represents a threshold of
         // 1.2 Mbps to continue probing.
@@ -613,12 +619,19 @@ impl ProbeController {
 
         let mut pending_probes: Vec<ProbeClusterConfig> = vec![];
         for mut bitrate in bitrates_to_probe.iter().cloned() {
-            assert!(!bitrate.is_zero());
+            debug_assert!(!bitrate.is_zero());
+            if bitrate.is_zero() {
+                continue;
+            }
             if bitrate >= max_probe_bitrate {
                 bitrate = max_probe_bitrate;
                 probe_further = false;
             }
             pending_probes.push(self.create_probe_cluster_config(now, bitrate));
+        }
+        if pending_probes.is_empty() {
+            self.update_state(State::ProbingComplete);
+            return pending_probes;
         }
         self.time_last_probing_initiated = now;
         if probe_further {

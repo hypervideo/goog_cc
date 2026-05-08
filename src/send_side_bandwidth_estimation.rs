@@ -241,21 +241,40 @@ impl SendSideBandwidthEstimation {
         let mut bitrate_threshold_kbps = 0.0;
 
         if field_trials.loss_experiment.enabled {
-            low_loss_threshold = field_trials.loss_experiment.low_loss_threshold;
-            high_loss_threshold = field_trials.loss_experiment.high_loss_threshold;
-            bitrate_threshold_kbps = field_trials.loss_experiment.bitrate_threshold_kbps;
-            assert!(low_loss_threshold > 0.0);
-            assert!(low_loss_threshold <= 1.0);
-            assert!(high_loss_threshold > 0.0);
-            assert!(high_loss_threshold <= 1.0);
-            assert!(low_loss_threshold <= high_loss_threshold);
-            assert!(bitrate_threshold_kbps >= 0.0);
-            tracing::debug!(
-                "Enabled BweLossExperiment with parameters {:?}, {:?}, {:?}",
-                low_loss_threshold,
-                high_loss_threshold,
-                bitrate_threshold_kbps
-            );
+            let configured_low_loss_threshold = field_trials.loss_experiment.low_loss_threshold;
+            let configured_high_loss_threshold = field_trials.loss_experiment.high_loss_threshold;
+            let configured_bitrate_threshold_kbps =
+                field_trials.loss_experiment.bitrate_threshold_kbps;
+            debug_assert!(configured_low_loss_threshold > 0.0);
+            debug_assert!(configured_low_loss_threshold <= 1.0);
+            debug_assert!(configured_high_loss_threshold > 0.0);
+            debug_assert!(configured_high_loss_threshold <= 1.0);
+            debug_assert!(configured_low_loss_threshold <= configured_high_loss_threshold);
+            debug_assert!(configured_bitrate_threshold_kbps >= 0.0);
+            if configured_low_loss_threshold > 0.0
+                && configured_low_loss_threshold <= 1.0
+                && configured_high_loss_threshold > 0.0
+                && configured_high_loss_threshold <= 1.0
+                && configured_low_loss_threshold <= configured_high_loss_threshold
+                && configured_bitrate_threshold_kbps >= 0.0
+            {
+                low_loss_threshold = configured_low_loss_threshold;
+                high_loss_threshold = configured_high_loss_threshold;
+                bitrate_threshold_kbps = configured_bitrate_threshold_kbps;
+                tracing::debug!(
+                    "Enabled BweLossExperiment with parameters {:?}, {:?}, {:?}",
+                    low_loss_threshold,
+                    high_loss_threshold,
+                    bitrate_threshold_kbps
+                );
+            } else {
+                tracing::warn!(
+                    "Ignoring invalid BweLossExperiment parameters {:?}, {:?}, {:?}",
+                    configured_low_loss_threshold,
+                    configured_high_loss_threshold,
+                    configured_bitrate_threshold_kbps
+                );
+            }
         }
         let bitrate_threshold = DataRate::from_kilobits_per_sec_float(bitrate_threshold_kbps);
 
@@ -588,7 +607,8 @@ impl SendSideBandwidthEstimation {
         }
     }
     pub fn set_send_bitrate(&mut self, bitrate: DataRate, at_time: Timestamp) {
-        assert!(bitrate > DataRate::zero());
+        debug_assert!(bitrate > DataRate::zero());
+        let bitrate = bitrate.max(self.min_bitrate_configured);
         // Reset to avoid being capped by the estimate.
         self.delay_based_limit = DataRate::plus_infinity();
         self.update_target_bitrate(bitrate, at_time);

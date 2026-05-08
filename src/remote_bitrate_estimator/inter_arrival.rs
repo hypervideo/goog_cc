@@ -138,7 +138,10 @@ impl InterArrival {
                 } else {
                     self.num_consecutive_reordered_packets = 0;
                 }
-                assert!(*arrival_time_delta_ms >= 0);
+                debug_assert!(*arrival_time_delta_ms >= 0);
+                if *arrival_time_delta_ms < 0 {
+                    return false;
+                }
                 *packet_size_delta = self.current_timestamp_group.size as i64
                     - self.prev_timestamp_group.size as i64;
                 calculated_deltas = true;
@@ -190,7 +193,10 @@ impl InterArrival {
     }
 
     fn belongs_to_burst(&self, arrival_time_ms: i64, timestamp: u32) -> bool {
-        assert!(self.current_timestamp_group.complete_time_ms >= 0);
+        debug_assert!(self.current_timestamp_group.complete_time_ms >= 0);
+        if self.current_timestamp_group.complete_time_ms < 0 {
+            return false;
+        }
         let arrival_time_delta_ms: i64 =
             arrival_time_ms - self.current_timestamp_group.complete_time_ms;
         let timestamp_diff: u32 = timestamp.wrapping_sub(self.current_timestamp_group.timestamp);

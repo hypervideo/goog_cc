@@ -84,7 +84,7 @@ impl DataRate {
 
     pub const fn millibyte_per_sec(&self) -> i64 {
         const MAX_BEFORE_CONVERSION: i64 = i64::MAX / (1000 / 8);
-        assert!(
+        debug_assert!(
             self.bps() < MAX_BEFORE_CONVERSION,
             "rate is too large to be expressed in microbytes per second"
         );
@@ -148,7 +148,7 @@ impl Mul<Frequency> for DataSize {
     type Output = DataRate;
 
     fn mul(self, frequency: Frequency) -> Self::Output {
-        assert!(frequency.is_zero() || self.bytes() <= i64::MAX / 8 / frequency.millihertz());
+        debug_assert!(frequency.is_zero() || self.bytes() <= i64::MAX / 8 / frequency.millihertz());
         let millibits_per_second: i64 = self.bytes() * 8 * frequency.millihertz();
         DataRate::from_bits_per_sec((millibits_per_second + 500) / 1000)
     }

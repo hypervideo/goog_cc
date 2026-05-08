@@ -39,29 +39,29 @@ macro_rules! unit_base {
             }
 
             pub const fn round_to(&self, resolution: Self) -> Self {
-                assert!(self.is_finite());
-                assert!(resolution.is_finite());
-                assert!(resolution.0 > 0);
+                debug_assert!(self.is_finite());
+                debug_assert!(resolution.is_finite());
+                debug_assert!(resolution.0 > 0);
                 Self::from_value(((self.0 + resolution.0 / 2) / resolution.0) * resolution.0)
             }
 
             pub const fn round_up_to(&self, resolution: Self) -> Self {
-                assert!(self.is_finite());
-                assert!(resolution.is_finite());
-                assert!(resolution.0 > 0);
+                debug_assert!(self.is_finite());
+                debug_assert!(resolution.is_finite());
+                debug_assert!(resolution.0 > 0);
                 Self::from_value(((self.0 + resolution.0 - 1) / resolution.0) * resolution.0)
             }
 
             pub const fn round_down_to(&self, resolution: Self) -> Self {
-                assert!(self.is_finite());
-                assert!(resolution.is_finite());
-                assert!(resolution.0 > 0);
+                debug_assert!(self.is_finite());
+                debug_assert!(resolution.is_finite());
+                debug_assert!(resolution.0 > 0);
                 Self::from_value((self.0 / resolution.0) * resolution.0)
             }
 
             #[allow(dead_code)]
             const fn from_fraction(denominator: i64, value: i64) -> Self {
-                assert!(denominator >= 0);
+                debug_assert!(denominator >= 0);
                 Self::from_value(value * denominator)
             }
 
@@ -76,7 +76,7 @@ macro_rules! unit_base {
             }
 
             const fn divide_round_to_nearest(&self, d: i64) -> i64 {
-                assert!(d >= 0);
+                debug_assert!(d >= 0);
 
                 let v = self.to_value();
                 let mut result = v / d;
@@ -94,13 +94,13 @@ macro_rules! unit_base {
 
             #[allow(dead_code)]
             fn to_fraction_float(self, denominator: f64) -> f64 {
-                assert!(denominator >= 0.0);
+                debug_assert!(denominator >= 0.0);
                 self.to_value_float() / denominator
             }
 
             #[allow(dead_code)]
             const fn to_fraction_or(self, denominator: i64, fallback_value: i64) -> i64 {
-                assert!(denominator >= 0);
+                debug_assert!(denominator >= 0);
                 if self.is_finite() {
                     self.divide_round_to_nearest(denominator)
                 } else {
@@ -109,33 +109,33 @@ macro_rules! unit_base {
             }
 
             pub const fn to_multiple(self, factor: i64) -> i64 {
-                assert!(factor >= 0);
+                debug_assert!(factor >= 0);
                 self.to_value() * factor
             }
 
             pub fn to_multiple_float(self, factor: f64) -> f64 {
-                assert!(factor >= 0.0);
+                debug_assert!(factor >= 0.0);
                 self.to_value_float() * factor
             }
 
             const fn from_value(value: i64) -> Self {
-                assert!(value != i64::MAX && value != i64::MIN);
+                debug_assert!(value != i64::MAX && value != i64::MIN);
                 if Self::ONE_SIDED {
-                    assert!(value >= 0);
+                    debug_assert!(value >= 0);
                 }
 
                 Self(value)
             }
 
             fn from_value_float(value: f64) -> Self {
-                assert!(!value.is_nan());
+                debug_assert!(!value.is_nan());
 
                 if value == f64::INFINITY {
                     return Self::plus_infinity();
                 }
 
                 if Self::ONE_SIDED {
-                    assert!(value >= 0.0);
+                    debug_assert!(value >= 0.0);
                 }
 
                 if value == f64::NEG_INFINITY {
@@ -146,7 +146,7 @@ macro_rules! unit_base {
             }
 
             const fn to_value(self) -> i64 {
-                assert!(self.is_finite());
+                debug_assert!(self.is_finite());
                 self.0
             }
 
@@ -187,12 +187,12 @@ macro_rules! relative_unit {
 
             fn add(self, rhs: Self) -> Self::Output {
                 if self.is_plus_infinity() || rhs.is_plus_infinity() {
-                    assert!(!self.is_minus_infinity());
-                    assert!(!rhs.is_minus_infinity());
+                    debug_assert!(!self.is_minus_infinity());
+                    debug_assert!(!rhs.is_minus_infinity());
                     return Self::plus_infinity();
                 } else if self.is_minus_infinity() || rhs.is_minus_infinity() {
-                    assert!(!self.is_plus_infinity());
-                    assert!(!rhs.is_plus_infinity());
+                    debug_assert!(!self.is_plus_infinity());
+                    debug_assert!(!rhs.is_plus_infinity());
                     return Self::minus_infinity();
                 }
                 Self::from_value(self.to_value() + rhs.to_value())
@@ -204,12 +204,12 @@ macro_rules! relative_unit {
 
             fn sub(self, rhs: Self) -> Self::Output {
                 if self.is_plus_infinity() || rhs.is_minus_infinity() {
-                    assert!(!self.is_minus_infinity());
-                    assert!(!rhs.is_plus_infinity());
+                    debug_assert!(!self.is_minus_infinity());
+                    debug_assert!(!rhs.is_plus_infinity());
                     return Self::plus_infinity();
                 } else if self.is_minus_infinity() || rhs.is_plus_infinity() {
-                    assert!(!self.is_plus_infinity());
-                    assert!(!rhs.is_minus_infinity());
+                    debug_assert!(!self.is_plus_infinity());
+                    debug_assert!(!rhs.is_minus_infinity());
                     return Self::minus_infinity();
                 }
                 Self::from_value(self.to_value() - rhs.to_value())

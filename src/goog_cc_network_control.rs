@@ -141,7 +141,7 @@ impl GoogCcNetworkController {
         let field_trials = config.field_trials.clone();
         let rate_control_settings = RateControlSettings::new(&field_trials);
 
-        assert!(config.constraints.at_time.is_finite());
+        debug_assert!(config.constraints.at_time.is_finite());
         let mut delay_based_bwe = DelayBasedBwe::new(&field_trials);
         delay_based_bwe.set_min_bitrate(CONGESTION_CONTROLLER_MIN_BITRATE);
 
@@ -591,7 +591,10 @@ impl NetworkControllerInterface for GoogCcNetworkController {
         if self.packet_feedback_only || msg.smoothed {
             return NetworkControlUpdate::default();
         }
-        assert!(!msg.round_trip_time.is_zero());
+        debug_assert!(!msg.round_trip_time.is_zero());
+        if msg.round_trip_time.is_zero() {
+            return NetworkControlUpdate::default();
+        }
         self.delay_based_bwe.on_rtt_update(msg.round_trip_time);
         self.bandwidth_estimation
             .update_rtt(msg.round_trip_time, msg.receive_time);
