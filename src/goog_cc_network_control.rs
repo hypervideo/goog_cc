@@ -30,7 +30,7 @@ use crate::{
 use super::{
     AcknowledgedBitrateEstimatorInterface, AlrDetector, BandwidthLimitedCause,
     CongestionWindowPushbackController, DelayBasedBwe, DelayBasedBweResult, LossBasedState,
-    ProbeBitrateEstimator, ProbeController, SendSideBandwidthEstimation,
+    ProbeBitrateEstimator, ProbeClusterObservation, ProbeController, SendSideBandwidthEstimation,
 };
 
 #[derive(Clone, Debug)]
@@ -212,6 +212,15 @@ impl GoogCcNetworkController {
     /// loss-based estimate. Exposed read-only for observability.
     pub fn acknowledged_bitrate(&self) -> Option<DataRate> {
         self.acknowledged_bitrate_estimator.bitrate()
+    }
+
+    /// goog_cc's own per-cluster probe observations, as computed by the internal
+    /// [`ProbeBitrateEstimator`] while processing transport feedback. Exposed
+    /// read-only for observability; reading it does not affect the estimate.
+    pub fn probe_cluster_observations(
+        &self,
+    ) -> impl Iterator<Item = &ProbeClusterObservation> {
+        self.probe_bitrate_estimator.probe_cluster_observations()
     }
 
     pub fn get_network_state(&self, at_time: Timestamp) -> NetworkControlUpdate {

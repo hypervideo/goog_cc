@@ -64,7 +64,6 @@ use inter_arrival_delta::*;
 use link_capacity_estimator::*;
 use loss_based_bandwidth_estimation::*;
 use loss_based_bwe_v2::*;
-use probe_bitrate_estimator::*;
 use probe_controller::*;
 use robust_throughput_estimator::*;
 use send_side_bandwidth_estimation::*;
@@ -73,6 +72,9 @@ use trendline_estimator::*;
 // Selectively export the public API.
 pub use api::{network_control, transport, units};
 pub use goog_cc_network_control::{GoogCcConfig, GoogCcNetworkController};
+pub use probe_bitrate_estimator::{
+    ProbeBitrateEstimator, ProbeClusterObservation, ProbeClusterStatus,
+};
 pub use {
     alr_detector::AlrDetectorConfig, bitrate_estimator::BitrateEstimatorConfig,
     delay_based_bwe::BweSeparateAudioPacketsSettings,

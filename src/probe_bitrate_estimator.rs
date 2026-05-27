@@ -15,6 +15,7 @@ use crate::api::{
     units::{DataRate, DataSize, TimeDelta, Timestamp},
 };
 
+#[derive(Clone, Copy)]
 struct AggregatedCluster {
     pub num_probes: i64,
     pub first_send: Timestamp,
@@ -41,42 +42,92 @@ impl Default for AggregatedCluster {
     }
 }
 
+/// Outcome of evaluating a probe cluster, mirroring the branches of
+/// [`ProbeBitrateEstimator::handle_probe_and_estimate_bitrate`]. Purely
+/// observational — does not affect the estimate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeClusterStatus {
+    /// Not enough received probes/bytes yet to evaluate.
+    Collecting,
+    /// Send or receive interval was out of range.
+    InvalidInterval,
+    /// receive/send ratio exceeded `MAX_VALID_RATIO`.
+    InvalidRatio,
+    /// Valid estimate; result is `min(send_rate, receive_rate)`.
+    Success,
+    /// Receiving well below the send rate (unsaturated link); result backed off
+    /// to `TARGET_UTILIZATION_FRACTION * receive_rate`.
+    Backoff,
+}
+
+/// Read-only snapshot of what [`ProbeBitrateEstimator`] computed for one probe
+/// cluster as it processed feedback. Exposed so callers can surface goog_cc's
+/// own probe accounting without recomputing it. All rates/intervals are zero
+/// until the corresponding stage of the computation is reached.
+#[derive(Debug, Clone, Copy)]
+pub struct ProbeClusterObservation {
+    pub cluster_id: i32,
+    pub status: ProbeClusterStatus,
+    /// Probe packets the estimator has received feedback about.
+    pub num_probes: i64,
+    /// Total received-probe bytes.
+    pub size_total: DataSize,
+    /// Minimum received probes/bytes required to evaluate the cluster.
+    pub min_probes: i64,
+    pub min_size: DataSize,
+    /// Configured probe target send rate (`pacing_info.send_bitrate`).
+    pub target_send_rate: DataRate,
+    pub send_interval: TimeDelta,
+    pub receive_interval: TimeDelta,
+    pub send_size: DataSize,
+    pub receive_size: DataSize,
+    pub send_rate: DataRate,
+    pub receive_rate: DataRate,
+    pub ratio: f64,
+    /// The estimate goog_cc derived for this cluster (the value returned to the
+    /// controller), or zero if the cluster did not produce one.
+    pub result_rate: DataRate,
+}
+
 #[derive(Default)]
 pub struct ProbeBitrateEstimator {
     clusters: HashMap<i32, AggregatedCluster>,
+    /// Latest per-cluster observation, kept in lockstep with `clusters` (erased
+    /// together). Observational only; never read by the estimate path.
+    cluster_observations: HashMap<i32, ProbeClusterObservation>,
     estimated_data_rate: Option<DataRate>,
 }
 
 impl ProbeBitrateEstimator {
     // The minumum number of probes we need to receive feedback about in percent
     // in order to have a valid estimate.
-    const MIN_RECEIVED_PROBES_RATIO: f64 = 0.80;
+    pub const MIN_RECEIVED_PROBES_RATIO: f64 = 0.80;
 
     // The minumum number of bytes we need to receive feedback about in percent
     // in order to have a valid estimate.
-    const MIN_RECEIVED_BYTES_RATIO: f64 = 0.80;
+    pub const MIN_RECEIVED_BYTES_RATIO: f64 = 0.80;
 
     // The maximum |receive rate| / |send rate| ratio for a valid estimate.
-    const MAX_VALID_RATIO: f64 = 2.0;
+    pub const MAX_VALID_RATIO: f64 = 2.0;
 
     // The minimum |receive rate| / |send rate| ratio assuming that the link is
     // not saturated, i.e. we assume that we will receive at least
     // MinRatioForUnsaturatedLink * |send rate| if |send rate| is less than the
     // link capacity.
-    const MIN_RATIO_FOR_UNSATURATED_LINK: f32 = 0.9;
+    pub const MIN_RATIO_FOR_UNSATURATED_LINK: f32 = 0.9;
 
     // The target utilization of the link. If we know true link capacity
     // we'd like to send at 95% of that rate.
-    const TARGET_UTILIZATION_FRACTION: f32 = 0.95;
+    pub const TARGET_UTILIZATION_FRACTION: f32 = 0.95;
 
     // The maximum time period over which the cluster history is retained.
     // This is also the maximum time period beyond which a probing burst is not
     // expected to last.
-    const MAX_CLUSTER_HISTORY: TimeDelta = TimeDelta::from_seconds(1);
+    pub const MAX_CLUSTER_HISTORY: TimeDelta = TimeDelta::from_seconds(1);
 
     // The maximum time interval between first and the last probe on a cluster
     // on the sender side as well as the receive side.
-    const MAX_PROBE_INTERVAL: TimeDelta = TimeDelta::from_seconds(1);
+    pub const MAX_PROBE_INTERVAL: TimeDelta = TimeDelta::from_seconds(1);
 
     // Should be called for every probe packet we receive feedback about.
     // Returns the estimated bitrate if the probe completes a valid cluster.
@@ -110,6 +161,12 @@ impl ProbeBitrateEstimator {
         }
         cluster.size_total += packet_feedback.sent_packet.size;
         cluster.num_probes += 1;
+
+        // Snapshot the aggregated cluster so the observation can be recorded into
+        // `self.cluster_observations` below without holding the `&mut self.clusters`
+        // borrow. The estimate logic reads only from this copy from here on, so it
+        // is byte-for-byte equivalent to operating on the borrow directly.
+        let cluster: AggregatedCluster = *cluster;
 
         debug_assert!(
             packet_feedback
@@ -150,12 +207,39 @@ impl ProbeBitrateEstimator {
                 .pacing_info
                 .probe_cluster_min_bytes as _,
         ) * Self::MIN_RECEIVED_BYTES_RATIO;
+
+        // Observational record of goog_cc's own computation for this cluster,
+        // filled in progressively as the estimate is derived below. Recording it
+        // never reads from or alters the estimate path; it only mirrors values
+        // the estimate path already computes so callers can surface them without
+        // recomputing.
+        let mut observation = ProbeClusterObservation {
+            cluster_id,
+            status: ProbeClusterStatus::Collecting,
+            num_probes: cluster.num_probes,
+            size_total: cluster.size_total,
+            min_probes,
+            min_size,
+            target_send_rate: packet_feedback.sent_packet.pacing_info.send_bitrate,
+            send_interval: TimeDelta::zero(),
+            receive_interval: TimeDelta::zero(),
+            send_size: DataSize::zero(),
+            receive_size: DataSize::zero(),
+            send_rate: DataRate::zero(),
+            receive_rate: DataRate::zero(),
+            ratio: 0.0,
+            result_rate: DataRate::zero(),
+        };
+
         if cluster.num_probes < min_probes || cluster.size_total < min_size {
+            self.cluster_observations.insert(cluster_id, observation);
             return None;
         }
 
         let send_interval: TimeDelta = cluster.last_send - cluster.first_send;
         let receive_interval: TimeDelta = cluster.last_receive - cluster.first_receive;
+        observation.send_interval = send_interval;
+        observation.receive_interval = receive_interval;
 
         if send_interval <= TimeDelta::zero()
             || send_interval > Self::MAX_PROBE_INTERVAL
@@ -164,6 +248,8 @@ impl ProbeBitrateEstimator {
         {
             tracing::debug!("Probing unsuccessful, invalid send/receive interval [cluster id: {}] [send interval: {:?}] [receive interval: {:?}]",
                       cluster_id, send_interval, receive_interval);
+            observation.status = ProbeClusterStatus::InvalidInterval;
+            self.cluster_observations.insert(cluster_id, observation);
             return None;
         }
         // Since the `send_interval` does not include the time it takes to actually
@@ -171,25 +257,34 @@ impl ProbeBitrateEstimator {
         // included when calculating the send bitrate.
         debug_assert!(cluster.size_total > cluster.size_last_send);
         if cluster.size_total <= cluster.size_last_send {
+            self.cluster_observations.insert(cluster_id, observation);
             return None;
         }
         let send_size: DataSize = cluster.size_total - cluster.size_last_send;
         let send_rate: DataRate = send_size / send_interval;
+        observation.send_size = send_size;
+        observation.send_rate = send_rate;
 
         // Since the `receive_interval` does not include the time it takes to
         // actually receive the first packet the size of the first received packet
         // should not be included when calculating the receive bitrate.
         debug_assert!(cluster.size_total > cluster.size_first_receive);
         if cluster.size_total <= cluster.size_first_receive {
+            self.cluster_observations.insert(cluster_id, observation);
             return None;
         }
         let receive_size: DataSize = cluster.size_total - cluster.size_first_receive;
         let receive_rate: DataRate = receive_size / receive_interval;
+        observation.receive_size = receive_size;
+        observation.receive_rate = receive_rate;
 
         let ratio: f64 = receive_rate / send_rate;
+        observation.ratio = ratio;
         if ratio > Self::MAX_VALID_RATIO {
             tracing::debug!("Probing unsuccessful, receive/send ratio too high [cluster id: {}] [send: {:?}/{:?} = {:?}] [receive: {:?}/{:?} = {:?}] [ratio: {:?} > {:?}]",
                       cluster_id, send_size, send_interval, send_rate, receive_size, receive_interval, receive_rate, ratio, Self::MAX_VALID_RATIO);
+            observation.status = ProbeClusterStatus::InvalidRatio;
+            self.cluster_observations.insert(cluster_id, observation);
             return None;
         }
 
@@ -197,15 +292,29 @@ impl ProbeBitrateEstimator {
                     cluster_id, send_size, send_interval, send_rate, receive_size, receive_interval, receive_rate);
 
         let mut res: DataRate = std::cmp::min(send_rate, receive_rate);
+        observation.status = ProbeClusterStatus::Success;
         // If we're receiving at significantly lower bitrate than we were sending at,
         // it suggests that we've found the true capacity of the link. In this case,
         // set the target bitrate slightly lower to not immediately overuse.
         if receive_rate < Self::MIN_RATIO_FOR_UNSATURATED_LINK * send_rate {
             debug_assert!(send_rate > receive_rate);
             res = Self::TARGET_UTILIZATION_FRACTION * receive_rate;
+            observation.status = ProbeClusterStatus::Backoff;
         }
+        observation.result_rate = res;
+        self.cluster_observations.insert(cluster_id, observation);
         self.estimated_data_rate = Some(res);
         self.estimated_data_rate
+    }
+
+    /// Read-only view of goog_cc's per-cluster probe observations, kept in
+    /// lockstep with the internal cluster history (erased after
+    /// [`Self::MAX_CLUSTER_HISTORY`]). Purely observational; consuming it does
+    /// not affect the estimate.
+    pub fn probe_cluster_observations(
+        &self,
+    ) -> impl Iterator<Item = &ProbeClusterObservation> {
+        self.cluster_observations.values()
     }
 
     pub fn fetch_and_reset_last_estimated_bitrate(&mut self) -> Option<DataRate> {
@@ -218,6 +327,10 @@ impl ProbeBitrateEstimator {
     fn erase_old_clusters(&mut self, timestamp: Timestamp) {
         self.clusters
             .retain(|_, cluster| cluster.last_receive + Self::MAX_CLUSTER_HISTORY >= timestamp);
+        // Keep observations in lockstep with the clusters they describe.
+        let clusters = &self.clusters;
+        self.cluster_observations
+            .retain(|id, _| clusters.contains_key(id));
     }
 }
 
