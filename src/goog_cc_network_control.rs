@@ -207,6 +207,13 @@ impl GoogCcNetworkController {
         }
     }
 
+    /// The acknowledged bitrate goog_cc currently derives from transport
+    /// feedback — the authoritative value it uses internally to bound the
+    /// loss-based estimate. Exposed read-only for observability.
+    pub fn acknowledged_bitrate(&self) -> Option<DataRate> {
+        self.acknowledged_bitrate_estimator.bitrate()
+    }
+
     pub fn get_network_state(&self, at_time: Timestamp) -> NetworkControlUpdate {
         NetworkControlUpdate {
             target_rate: Some(TargetTransferRate {
