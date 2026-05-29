@@ -583,8 +583,17 @@ impl NetworkControllerInterface for GoogCcNetworkController {
             self.current_data_window,
         ) {
             (Some(congestion_window_pushback_controller), Some(current_data_window)) => {
-                congestion_window_pushback_controller
-                    .update_outstanding_data(current_data_window.bytes())
+                // Mirror libwebrtc `OnProcessInterval`: refresh pushback's
+                // data-window denominator so its `fill_ratio` keeps tracking
+                // the cwnd numerator that goog_cc just grew. The initial
+                // Rust port (bc95a8d5) called `update_outstanding_data` here
+                // instead, which writes the cwnd into pushback's
+                // outstanding-bytes field — a numerator/denominator swap
+                // that latches `fill_ratio > 1` forever once feedback goes
+                // quiet (standalone uplink hit this; hyper-proper is masked
+                // by continuous feedback running the correct path in
+                // `on_transport_packets_feedback`).
+                congestion_window_pushback_controller.set_data_window(current_data_window)
             }
             _ => update.congestion_window = self.current_data_window,
         };
