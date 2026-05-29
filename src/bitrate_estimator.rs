@@ -49,7 +49,7 @@ impl BitrateEstimatorConfig {
     pub fn validate(&mut self) {
         self.initial_window_ms = self
             .initial_window_ms
-            .clamp(Self::MAX_RATE_WINDOW_MS, Self::MAX_RATE_WINDOW_MS);
+            .clamp(Self::MIN_RATE_WINDOW_MS, Self::MAX_RATE_WINDOW_MS);
         self.window_ms = self
             .window_ms
             .clamp(Self::MIN_RATE_WINDOW_MS, Self::MAX_RATE_WINDOW_MS);
