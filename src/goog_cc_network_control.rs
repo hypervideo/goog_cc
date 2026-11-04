@@ -538,10 +538,15 @@ impl NetworkControllerInterface for GoogCcNetworkController {
             congestion_window_pushback_controller.update_pacing_queue(pacer_queue.bytes())
         };
         self.bandwidth_estimation.update_estimate(msg.at_time);
-        self.probe_controller.set_alr_start_time(
-            self.alr_detector
-                .get_application_limited_region_start_time(),
-        );
+        // Avoid ALR probing before the first transport feedback is received in
+        // order to avoid ALR probing if receive side BWE is used.
+        self.probe_controller
+            .set_alr_start_time(if self.first_transport_feedback_received {
+                self.alr_detector
+                    .get_application_limited_region_start_time()
+            } else {
+                None
+            });
 
         let mut probes = self.probe_controller.process(msg.at_time);
         update.probe_cluster_configs.append(&mut probes);
