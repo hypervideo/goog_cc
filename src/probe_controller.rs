@@ -57,6 +57,7 @@ pub struct ProbeControllerConfig {
 
     // Configures the probes emitted by changed to the allocated bitrate.
     pub probe_max_allocation: bool,
+    pub probe_max_allocation_without_alr: bool,
     pub alloc_p1: f64,
     pub alloc_p2: f64,
     pub alloc_current_bwe_limit: f64,
@@ -96,6 +97,7 @@ impl Default for ProbeControllerConfig {
             network_state_probe_duration: TimeDelta::from_millis(15),
             network_state_min_probe_delta: TimeDelta::from_millis(20),
             probe_max_allocation: true,
+            probe_max_allocation_without_alr: true,
             alloc_p1: 1.0,
             alloc_p2: 2.0,
             alloc_current_bwe_limit: 2.0,
@@ -278,10 +280,10 @@ impl ProbeController {
         at_time: Timestamp,
     ) -> Vec<ProbeClusterConfig> {
         let in_alr: bool = self.alr_start_time.is_some();
-        let allow_allocation_probe: bool = in_alr;
+        let allow_allocation_probe: bool = in_alr || self.config.probe_max_allocation_without_alr;
         if self.config.probe_max_allocation
             && matches!(self.state, State::ProbingComplete)
-            && max_total_allocated_bitrate != self.max_total_allocated_bitrate
+            && max_total_allocated_bitrate > self.max_total_allocated_bitrate
             && self.estimated_bitrate < self.max_bitrate
             && self.estimated_bitrate < max_total_allocated_bitrate
             && allow_allocation_probe
@@ -912,9 +914,10 @@ mod test {
     }
 
     #[test]
-    fn probes_on_max_allocated_bitrate_increase_only_when_in_alr() {
+    fn probes_in_alr_when_allocation_probing_outside_alr_is_disabled() {
         let mut clock = Timestamp::zero();
         let mut probe_controller = ProbeController::new(ProbeControllerConfig {
+            probe_max_allocation_without_alr: false,
             ..Default::default()
         });
         assert!(probe_controller
@@ -941,12 +944,110 @@ mod test {
             .on_max_total_allocated_bitrate(MAX_BITRATE + DataRate::from_bits_per_sec(1), clock);
         assert_eq!(probes.len(), 2);
         assert_eq!(probes[0].target_data_rate, MAX_BITRATE);
+    }
 
-        // Do not probe when not in alr.
-        probe_controller.set_alr_start_time(None);
-        let probes = probe_controller
-            .on_max_total_allocated_bitrate(MAX_BITRATE + DataRate::from_bits_per_sec(2), clock);
+    #[test]
+    fn probes_on_max_allocated_bitrate_increase_outside_alr_by_default() {
+        let mut clock = Timestamp::zero();
+        let mut probe_controller = ProbeController::new(ProbeControllerConfig::default());
+        const TRANSPORT_MAX_BITRATE: DataRate = DataRate::from_kilobits_per_sec(10000);
+        const ESTIMATED_AFTER_INITIAL_PROBING: DataRate = DataRate::from_kilobits_per_sec(300);
+        const SCREEN_SHARE_MAX_BITRATE: DataRate = DataRate::from_kilobits_per_sec(3500);
+
+        assert!(probe_controller
+            .on_network_availability(NetworkAvailability {
+                network_available: true,
+                ..Default::default()
+            })
+            .is_empty());
+        probe_controller.set_bitrates(MIN_BITRATE, START_BITRATE, TRANSPORT_MAX_BITRATE, clock);
+        probe_controller.set_estimated_bitrate(
+            ESTIMATED_AFTER_INITIAL_PROBING,
+            BandwidthLimitedCause::DelayBasedLimited,
+            clock,
+        );
+        clock += EXPONENTIAL_PROBING_TIMEOUT;
+        let probes = probe_controller.process(clock);
         assert!(probes.is_empty());
+
+        probe_controller.set_alr_start_time(None);
+        let probes =
+            probe_controller.on_max_total_allocated_bitrate(SCREEN_SHARE_MAX_BITRATE, clock);
+        assert_eq!(probes.len(), 1);
+        assert_eq!(
+            probes[0].target_data_rate,
+            2 * ESTIMATED_AFTER_INITIAL_PROBING
+        );
+    }
+
+    #[test]
+    fn allocation_probing_outside_alr_can_be_disabled() {
+        let mut clock = Timestamp::zero();
+        let mut probe_controller = ProbeController::new(ProbeControllerConfig {
+            probe_max_allocation_without_alr: false,
+            ..Default::default()
+        });
+        const TRANSPORT_MAX_BITRATE: DataRate = DataRate::from_kilobits_per_sec(10000);
+        const ESTIMATED_AFTER_INITIAL_PROBING: DataRate = DataRate::from_kilobits_per_sec(300);
+        const SCREEN_SHARE_MAX_BITRATE: DataRate = DataRate::from_kilobits_per_sec(3500);
+
+        assert!(probe_controller
+            .on_network_availability(NetworkAvailability {
+                network_available: true,
+                ..Default::default()
+            })
+            .is_empty());
+        probe_controller.set_bitrates(MIN_BITRATE, START_BITRATE, TRANSPORT_MAX_BITRATE, clock);
+        probe_controller.set_estimated_bitrate(
+            ESTIMATED_AFTER_INITIAL_PROBING,
+            BandwidthLimitedCause::DelayBasedLimited,
+            clock,
+        );
+        clock += EXPONENTIAL_PROBING_TIMEOUT;
+        let probes = probe_controller.process(clock);
+        assert!(probes.is_empty());
+
+        probe_controller.set_alr_start_time(None);
+        assert!(probe_controller
+            .on_max_total_allocated_bitrate(SCREEN_SHARE_MAX_BITRATE, clock)
+            .is_empty());
+    }
+
+    #[test]
+    fn does_not_probe_when_max_allocated_bitrate_decreases() {
+        let mut clock = Timestamp::zero();
+        let mut probe_controller = ProbeController::new(ProbeControllerConfig::default());
+
+        assert!(probe_controller
+            .on_network_availability(NetworkAvailability {
+                network_available: true,
+                ..Default::default()
+            })
+            .is_empty());
+        let probes = probe_controller.set_bitrates(MIN_BITRATE, START_BITRATE, MAX_BITRATE, clock);
+        assert!(!probes.is_empty());
+
+        // Set the initial allocation while initial probing is still in progress.
+        assert!(probe_controller
+            .on_max_total_allocated_bitrate(MAX_BITRATE, clock)
+            .is_empty());
+        probe_controller.set_estimated_bitrate(
+            START_BITRATE,
+            BandwidthLimitedCause::DelayBasedLimited,
+            clock,
+        );
+        clock += EXPONENTIAL_PROBING_TIMEOUT;
+        assert!(probe_controller.process(clock).is_empty());
+
+        // A lower allocation should update the limit without triggering a probe.
+        assert!(probe_controller
+            .on_max_total_allocated_bitrate(MAX_BITRATE / 2, clock)
+            .is_empty());
+
+        // A subsequent increase from the lower allocation should trigger probing.
+        let probes =
+            probe_controller.on_max_total_allocated_bitrate(MAX_BITRATE * 3 / 4_i64, clock);
+        assert!(!probes.is_empty());
     }
 
     #[test]
