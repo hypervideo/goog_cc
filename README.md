@@ -17,7 +17,7 @@ All I did was port it to Rust.
 ## Updates
 I will periodically update this crate with the latest changes from the WebRTC project.
 
-The current version: [da2a3d6c4d](https://webrtc.googlesource.com/src/+/da2a3d6c4d) (2024-12-09)
+The current version: [3075edeba1](https://webrtc.googlesource.com/src/+/3075edeba1) (2026-11-04)
 
 ## Notable Changes
 **NetworkStateEstimator and NetworkStatePredictor have been removed.**
