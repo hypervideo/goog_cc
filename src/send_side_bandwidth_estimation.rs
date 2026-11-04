@@ -41,74 +41,6 @@ impl Default for BweLossExperiment {
     }
 }
 
-pub struct LinkCapacityTracker {
-    capacity_estimate_bps: f64,
-    last_link_capacity_update: Timestamp, // = Timestamp::minus_infinity();
-    last_delay_based_estimate: DataRate,  // = DataRate::plus_infinity();
-}
-
-impl Default for LinkCapacityTracker {
-    fn default() -> Self {
-        Self {
-            capacity_estimate_bps: 0.0,
-            last_link_capacity_update: Timestamp::minus_infinity(),
-            last_delay_based_estimate: DataRate::plus_infinity(),
-        }
-    }
-}
-
-impl LinkCapacityTracker {
-    // Call when a new delay-based estimate is available.
-    pub fn update_delay_based_estimate(
-        &mut self,
-        at_time: Timestamp,
-        delay_based_bitrate: DataRate,
-    ) {
-        if delay_based_bitrate < self.last_delay_based_estimate {
-            self.capacity_estimate_bps = self
-                .capacity_estimate_bps
-                .min(delay_based_bitrate.bps_float());
-            self.last_link_capacity_update = at_time;
-        }
-        self.last_delay_based_estimate = delay_based_bitrate;
-    }
-    pub fn on_starting_rate(&mut self, start_rate: DataRate) {
-        if self.last_link_capacity_update.is_infinite() {
-            self.capacity_estimate_bps = start_rate.bps_float();
-        }
-    }
-    pub fn on_rate_update(
-        &mut self,
-        acknowledged: Option<DataRate>,
-        target: DataRate,
-        at_time: Timestamp,
-    ) {
-        let acknowledged = match acknowledged {
-            Some(ack) => ack,
-            None => return,
-        };
-        let acknowledged_target: DataRate = std::cmp::min(acknowledged, target);
-        if acknowledged_target.bps_float() > self.capacity_estimate_bps {
-            let delta: TimeDelta = at_time - self.last_link_capacity_update;
-            let alpha: f64 = if delta.is_finite() {
-                (-(delta / TimeDelta::from_seconds(10))).exp()
-            } else {
-                0.0
-            };
-            self.capacity_estimate_bps = alpha * self.capacity_estimate_bps
-                + (1.0 - alpha) * acknowledged_target.bps_float();
-        }
-        self.last_link_capacity_update = at_time;
-    }
-    pub fn on_rtt_backoff(&mut self, backoff_rate: DataRate, at_time: Timestamp) {
-        self.capacity_estimate_bps = self.capacity_estimate_bps.min(backoff_rate.bps_float());
-        self.last_link_capacity_update = at_time;
-    }
-    pub fn estimate(&self) -> DataRate {
-        DataRate::from_bits_per_sec_float(self.capacity_estimate_bps)
-    }
-}
-
 // WebRTC-Bwe-MaxRttLimit
 #[derive(Clone, Debug)]
 pub struct RttBasedBackoffConfig {
@@ -179,7 +111,6 @@ impl RttBasedBackoff {
 pub struct SendSideBandwidthEstimation {
     field_trials: FieldTrials,
     rtt_backoff: RttBasedBackoff,
-    link_capacity: LinkCapacityTracker,
 
     min_bitrate_history: VecDeque<(Timestamp, DataRate)>,
 
@@ -286,7 +217,6 @@ impl SendSideBandwidthEstimation {
 
         Self {
             rtt_backoff: RttBasedBackoff::new(&field_trials.max_rtt_limit),
-            link_capacity: LinkCapacityTracker::default(),
             min_bitrate_history: VecDeque::new(),
             lost_packets_since_last_loss_update: 0,
             expected_packets_since_last_loss_update: 0,
@@ -370,9 +300,6 @@ impl SendSideBandwidthEstimation {
         self.last_round_trip_time
     }
 
-    pub fn get_estimated_link_capacity(&self) -> DataRate {
-        self.link_capacity.estimate()
-    }
     // Call periodically to update estimate.
     pub fn update_estimate(&mut self, at_time: Timestamp) {
         if self.rtt_backoff.is_rtt_above_limit() {
@@ -384,7 +311,6 @@ impl SendSideBandwidthEstimation {
                     self.current_target * self.rtt_backoff.drop_fraction,
                     self.rtt_backoff.bandwidth_floor,
                 );
-                self.link_capacity.on_rtt_backoff(new_bitrate, at_time);
                 self.update_target_bitrate(new_bitrate, at_time);
                 return;
             }
@@ -514,8 +440,6 @@ impl SendSideBandwidthEstimation {
     }
     // Call when a new delay-based estimate is available.
     pub fn update_delay_based_estimate(&mut self, at_time: Timestamp, bitrate: DataRate) {
-        self.link_capacity
-            .update_delay_based_estimate(at_time, bitrate);
         // TODO(srte): Ensure caller passes plus_infinity, not zero, to represent no
         // limitation.
         self.delay_based_limit = if bitrate.is_zero() {
@@ -578,7 +502,6 @@ impl SendSideBandwidthEstimation {
     ) {
         self.set_min_max_bitrate(min_bitrate, max_bitrate);
         if let Some(send_bitrate) = send_bitrate {
-            self.link_capacity.on_starting_rate(send_bitrate);
             self.set_send_bitrate(send_bitrate, at_time);
         }
     }
@@ -701,8 +624,6 @@ impl SendSideBandwidthEstimation {
             new_bitrate = self.min_bitrate_configured;
         }
         self.current_target = new_bitrate;
-        self.link_capacity
-            .on_rate_update(self.acknowledged_rate, self.current_target, at_time);
     }
     // Applies lower and upper bounds to the current target rate.
     // TODO(srte): This seems to be called even when limits haven't changed, that

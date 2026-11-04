@@ -98,7 +98,6 @@ pub struct GoogCcNetworkController {
 
     last_loss_based_target_rate: DataRate,
     last_pushback_target_rate: DataRate,
-    last_stable_target_rate: DataRate,
     last_loss_base_state: LossBasedState,
 
     last_estimated_fraction_loss: u8,
@@ -166,7 +165,6 @@ impl GoogCcNetworkController {
             feedback_max_rtts: VecDeque::new(),
             last_loss_based_target_rate: config.constraints.starting_rate.unwrap(),
             last_pushback_target_rate: config.constraints.starting_rate.unwrap(),
-            last_stable_target_rate: config.constraints.starting_rate.unwrap(),
             last_loss_base_state: LossBasedState::DelayBasedEstimate,
             last_estimated_fraction_loss: 0,
             last_estimated_round_trip_time: TimeDelta::plus_infinity(),
@@ -217,7 +215,6 @@ impl GoogCcNetworkController {
                 },
                 at_time,
                 target_rate: self.last_pushback_target_rate,
-                stable_target_rate: self.bandwidth_estimation.get_estimated_link_capacity(),
                 ..Default::default()
             }),
             pacer_config: Some(self.get_pacing_rates(at_time)),
@@ -310,22 +307,17 @@ impl GoogCcNetworkController {
                     / loss_based_target_rate.bps_float();
             }
         }
-        let mut stable_target_rate: DataRate =
-            self.bandwidth_estimation.get_estimated_link_capacity();
-        stable_target_rate = std::cmp::min(stable_target_rate, pushback_target_rate);
 
         if (loss_based_target_rate != self.last_loss_based_target_rate)
             || (loss_based_state != self.last_loss_base_state)
             || (fraction_loss != self.last_estimated_fraction_loss)
             || (round_trip_time != self.last_estimated_round_trip_time)
             || (pushback_target_rate != self.last_pushback_target_rate)
-            || (stable_target_rate != self.last_stable_target_rate)
         {
             self.last_loss_based_target_rate = loss_based_target_rate;
             self.last_pushback_target_rate = pushback_target_rate;
             self.last_estimated_fraction_loss = fraction_loss;
             self.last_estimated_round_trip_time = round_trip_time;
-            self.last_stable_target_rate = stable_target_rate;
             self.last_loss_base_state = loss_based_state;
 
             self.alr_detector
@@ -335,7 +327,6 @@ impl GoogCcNetworkController {
 
             let mut target_rate_msg = TargetTransferRate {
                 at_time,
-                stable_target_rate,
                 network_estimate: NetworkEstimate {
                     at_time,
                     round_trip_time,
@@ -1539,46 +1530,6 @@ mod test {
     #[test]
     fn UpdatesTargetRateBasedOnLinkCapacity() {
       UpdatesTargetRateBasedOnLinkCapacity();
-    }
-    */
-
-    /*
-    #[test]
-    fn StableEstimateDoesNotVaryInSteadyState() {
-    let factory = GoogCcNetworkControllerFactory::default();
-      let s = Scenario::new("googcc_unit/stable_target", false);
-      let mut config = CallClientConfig::default();
-      config.transport.cc_factory = &factory;
-      let mut net_conf = NetworkSimulationConfig::default();
-      net_conf.bandwidth = DataRate::KilobitsPerSec(500);
-      net_conf.delay = TimeDelta::Millis(100);
-    let send_net = s.CreateSimulationNode(net_conf);
-    let ret_net = s.CreateSimulationNode(net_conf);
-
-    let client = CreateVideoSendingClient(&s, config, {send_net}, {ret_net});
-      // Run for a while to allow the estimate to stabilize.
-      s.RunFor(TimeDelta::Seconds(30));
-      let min_stable_target: DataRate = DataRate::plus_infinity();
-      let max_stable_target: DataRate = DataRate::minus_infinity();
-      let min_target: DataRate = DataRate::plus_infinity();
-      let max_target: DataRate = DataRate::minus_infinity();
-
-      // Measure variation in steady state.
-       for i in 0..20 {
-    let stable_target_rate = client.stable_target_rate();
-    let target_rate = client.target_rate();
-        assert!(stable_target_rate <= target_rate);
-
-        min_stable_target = std::cmp::min(min_stable_target, stable_target_rate);
-        max_stable_target = std::cmp::max(max_stable_target, stable_target_rate);
-        min_target = std::cmp::min(min_target, target_rate);
-        max_target = std::cmp::max(max_target, target_rate);
-        s.RunFor(TimeDelta::Seconds(1));
-      }
-      // We should expect drops by at least 15% (default backoff.)
-      assert!(min_target / max_target < 0.85);
-      // We should expect the stable target to be more stable than the immediate one
-      assert!(min_stable_target / max_stable_target >= min_target / max_target);
     }
     */
 

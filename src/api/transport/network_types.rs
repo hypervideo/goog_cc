@@ -433,7 +433,6 @@ pub struct TargetTransferRate {
     /// The estimate on which the target rate is based on.
     pub network_estimate: NetworkEstimate,
     pub target_rate: DataRate,
-    pub stable_target_rate: DataRate,
     pub cwnd_reduce_ratio: f64,
 }
 
@@ -443,7 +442,6 @@ impl Default for TargetTransferRate {
             at_time: Timestamp::plus_infinity(),
             network_estimate: NetworkEstimate::default(),
             target_rate: DataRate::zero(),
-            stable_target_rate: DataRate::zero(),
             cwnd_reduce_ratio: 0.0,
         }
     }
