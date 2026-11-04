@@ -104,6 +104,7 @@ pub struct GoogCcNetworkController {
     last_estimated_round_trip_time: TimeDelta, //= TimeDelta::plus_infinity();
 
     pacing_factor: f64,
+    pacing_time_window: TimeDelta,
     min_total_allocated_bitrate: DataRate,
     max_padding_rate: DataRate,
 
@@ -172,6 +173,7 @@ impl GoogCcNetworkController {
                 .stream_based_config
                 .pacing_factor
                 .unwrap_or(Self::DEFAULT_PACE_MULTIPLIER),
+            pacing_time_window: config.default_pacing_time_window,
             min_total_allocated_bitrate: config
                 .stream_based_config
                 .min_total_allocated_bitrate
@@ -402,12 +404,7 @@ impl GoogCcNetworkController {
                 self.max_padding_rate
             };
         padding_rate = std::cmp::min(padding_rate, self.last_pushback_target_rate);
-        let mut msg = PacerConfig::default();
-        msg.at_time = at_time;
-        msg.time_window = TimeDelta::from_seconds(1);
-        msg.data_window = pacing_rate * msg.time_window;
-        msg.pad_window = padding_rate * msg.time_window;
-        msg
+        PacerConfig::create(at_time, pacing_rate, padding_rate, self.pacing_time_window)
     }
 
     fn set_network_state_estimate(&mut self, estimate: Option<NetworkStateEstimate>) {
@@ -883,7 +880,6 @@ fn get_bandwidth_limited_cause(
 
 #[cfg(test)]
 mod test {
-    use approx::assert_relative_eq;
     use test_trace::test;
 
     use crate::api::transport::PacketResult;
@@ -1215,10 +1211,9 @@ mod test {
         let update =
             controller.on_network_route_change(create_route_change(current_time, None, None, None));
         assert_eq!(update.target_rate.unwrap().target_rate, DEFAULT_MIN_BITRATE);
-        assert_relative_eq!(
-            update.pacer_config.unwrap().data_rate().bps_float(),
-            DEFAULT_MIN_BITRATE.bps_float() * DEFAULT_PACING_RATE,
-            epsilon = 10.0
+        assert_eq!(
+            update.pacer_config.unwrap().data_window,
+            DEFAULT_MIN_BITRATE * DEFAULT_PACING_RATE * PacerConfig::DEFAULT_TIME_INTERVAL
         );
         assert_eq!(update.probe_cluster_configs.len(), 2);
     }

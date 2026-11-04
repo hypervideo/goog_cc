@@ -25,7 +25,7 @@ pub trait TargetTransferRateObserver {
 
 /// Configuration sent to factory create function. The parameters here are
 /// optional to use for a network controller implementation.
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct NetworkControllerConfig {
     pub field_trials: FieldTrials,
 
@@ -37,6 +37,21 @@ pub struct NetworkControllerConfig {
     /// Initial stream specific configuration, these are changed at any later time
     /// by calls to OnStreamsConfig.
     pub stream_based_config: StreamsConfig,
+    /// Default time window used for calculating how send packets are paced.
+    /// Note that a network controller can choose to request the pacer to pace
+    /// packets stricter.
+    pub default_pacing_time_window: TimeDelta,
+}
+
+impl Default for NetworkControllerConfig {
+    fn default() -> Self {
+        Self {
+            field_trials: FieldTrials::default(),
+            constraints: TargetRateConstraints::default(),
+            stream_based_config: StreamsConfig::default(),
+            default_pacing_time_window: PacerConfig::DEFAULT_TIME_INTERVAL,
+        }
+    }
 }
 
 /// NetworkControllerInterface is implemented by network controllers. A network

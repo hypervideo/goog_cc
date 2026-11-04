@@ -376,6 +376,8 @@ impl Default for NetworkEstimate {
 pub struct PacerConfig {
     pub at_time: Timestamp,
     /// Pacer should send at most data_window data over time_window duration.
+    /// If `time_window` is zero, the pacer should pace every packet as accurately
+    /// as possible, and [`Self::data_rate`] is `data_window` over 1s.
     pub data_window: DataSize,
     pub time_window: TimeDelta,
     /// Pacer should send at least pad_window data over time_window duration.
@@ -394,11 +396,37 @@ impl Default for PacerConfig {
 }
 
 impl PacerConfig {
+    pub const DEFAULT_TIME_INTERVAL: TimeDelta = TimeDelta::from_millis(40);
+
+    pub fn create(
+        at_time: Timestamp,
+        send_rate: DataRate,
+        pad_rate: DataRate,
+        time_window: TimeDelta,
+    ) -> Self {
+        let mut pacer_config = PacerConfig {
+            at_time,
+            time_window,
+            ..Default::default()
+        };
+        // Note that precision is lost here, since DataSize store number of bytes.
+        pacer_config.data_window = send_rate * pacer_config.rate_window();
+        pacer_config.pad_window = pad_rate * pacer_config.rate_window();
+        pacer_config
+    }
+
+    pub fn rate_window(&self) -> TimeDelta {
+        if self.time_window.is_zero() {
+            TimeDelta::from_seconds(1)
+        } else {
+            self.time_window
+        }
+    }
     pub fn data_rate(&self) -> DataRate {
-        self.data_window / self.time_window
+        self.data_window / self.rate_window()
     }
     pub fn pad_rate(&self) -> DataRate {
-        self.pad_window / self.time_window
+        self.pad_window / self.rate_window()
     }
 }
 
