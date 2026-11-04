@@ -28,7 +28,7 @@ pub struct StreamsConfig {
     /// If `enable_repeated_initial_probing` is set to true, Probes are sent
     /// periodically every 1s during the first 5s after the network becomes
     /// available. The probes ignores max_total_allocated_bitrate.
-    pub enable_repeated_initial_probing: Option<bool>,
+    pub enable_repeated_initial_probing: bool,
     pub pacing_factor: Option<f64>,
 
     // TODO(srte): Use BitrateAllocationLimits here.
@@ -42,7 +42,7 @@ impl Default for StreamsConfig {
         Self {
             at_time: Timestamp::plus_infinity(),
             requests_alr_probing: None,
-            enable_repeated_initial_probing: None,
+            enable_repeated_initial_probing: false,
             pacing_factor: None,
             min_total_allocated_bitrate: None,
             max_padding_rate: None,

@@ -501,13 +501,11 @@ impl NetworkControllerInterface for GoogCcNetworkController {
                 self.probe_controller
                     .enable_periodic_alr_probing(requests_alr_probing);
             }
-            if let Some(enable_repeated_initial_probing) = initial_config
-                .stream_based_config
-                .enable_repeated_initial_probing
-            {
-                self.probe_controller
-                    .enable_repeated_initial_probing(enable_repeated_initial_probing);
-            }
+            self.probe_controller.enable_repeated_initial_probing(
+                initial_config
+                    .stream_based_config
+                    .enable_repeated_initial_probing,
+            );
             let total_bitrate: Option<DataRate> = initial_config
                 .stream_based_config
                 .max_total_allocated_bitrate;
