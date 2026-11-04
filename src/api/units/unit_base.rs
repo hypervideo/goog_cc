@@ -176,12 +176,6 @@ macro_rules! relative_unit {
     ($ty:ident) => {
         crate::api::units::unit_base!($ty);
 
-        impl $ty {
-            pub fn clamp_mut(&mut self, min_value: Self, max_value: Self) {
-                *self = Self(self.0.max(min_value.0).min(max_value.0));
-            }
-        }
-
         impl ::std::ops::Add for $ty {
             type Output = Self;
 
@@ -710,28 +704,6 @@ mod test {
     #[should_panic]
     fn crashes_when_created_from_nan3() {
         TestUnit::from_value_float(f64::INFINITY - f64::INFINITY);
-    }
-
-    #[test]
-    fn clamping() {
-        const UPPER: TestUnit = TestUnit::from_value(800);
-        const LOWER: TestUnit = TestUnit::from_value(100);
-        const UNDER: TestUnit = TestUnit::from_value(100);
-        const INSIDE: TestUnit = TestUnit::from_value(500);
-        const OVER: TestUnit = TestUnit::from_value(1000);
-        assert_eq!(UNDER.clamp(LOWER, UPPER), LOWER);
-        assert_eq!(INSIDE.clamp(LOWER, UPPER), INSIDE);
-        assert_eq!(OVER.clamp(LOWER, UPPER), UPPER);
-
-        let mut mutable_delta: TestUnit = LOWER;
-        mutable_delta.clamp_mut(LOWER, UPPER);
-        assert_eq!(mutable_delta, LOWER);
-        mutable_delta = INSIDE;
-        mutable_delta.clamp_mut(LOWER, UPPER);
-        assert_eq!(mutable_delta, INSIDE);
-        mutable_delta = OVER;
-        mutable_delta.clamp_mut(LOWER, UPPER);
-        assert_eq!(mutable_delta, UPPER);
     }
 
     #[test]

@@ -191,28 +191,6 @@ mod test {
     }
 
     #[test]
-    fn clamping() {
-        const UPPER: Frequency = Frequency::from_hertz(800);
-        const LOWER: Frequency = Frequency::from_hertz(100);
-        const UNDER: Frequency = Frequency::from_hertz(100);
-        const INSIDE: Frequency = Frequency::from_hertz(500);
-        const OVER: Frequency = Frequency::from_hertz(1000);
-        assert_eq!(UNDER.clamp(LOWER, UPPER), LOWER);
-        assert_eq!(INSIDE.clamp(LOWER, UPPER), INSIDE);
-        assert_eq!(OVER.clamp(LOWER, UPPER), UPPER);
-
-        let mut mutable_frequency: Frequency = LOWER;
-        mutable_frequency.clamp_mut(LOWER, UPPER);
-        assert_eq!(mutable_frequency, LOWER);
-        mutable_frequency = INSIDE;
-        mutable_frequency.clamp_mut(LOWER, UPPER);
-        assert_eq!(mutable_frequency, INSIDE);
-        mutable_frequency = OVER;
-        mutable_frequency.clamp_mut(LOWER, UPPER);
-        assert_eq!(mutable_frequency, UPPER);
-    }
-
-    #[test]
     fn math_operations() {
         const VALUE_A: i64 = 457;
         const VALUE_B: i64 = 260;
