@@ -56,7 +56,6 @@ impl Default for SafeResetOnRouteChange {
 pub struct GoogCcConfig {
     // network_state_estimator: Box<dyn NetworkStateEstimator>,
     // network_state_predictor: Box<dyn NetworkStatePredictor>,
-    pub feedback_only: bool,
 }
 
 /// Google Congestion Control.
@@ -67,7 +66,6 @@ pub struct GoogCcConfig {
 pub struct GoogCcNetworkController {
     field_trials: FieldTrials,
 
-    packet_feedback_only: bool,
     safe_reset_on_route_change: bool,
     safe_reset_acknowledged_rate: bool,
     use_min_allocatable_as_lower_bound: bool,
@@ -96,10 +94,6 @@ pub struct GoogCcNetworkController {
 
     estimate: Option<NetworkStateEstimate>,
 
-    next_loss_update: Timestamp, // = Timestamp::minus_infinity();
-    lost_packets_since_last_loss_update: i64,
-    expected_packets_since_last_loss_update: i64,
-
     feedback_max_rtts: VecDeque<i64>,
 
     last_loss_based_target_rate: DataRate,
@@ -120,9 +114,6 @@ pub struct GoogCcNetworkController {
 }
 
 impl GoogCcNetworkController {
-    // From RTCPSender video report interval.
-    const LOSS_UPDATE_INTERVAL: TimeDelta = TimeDelta::from_millis(1000);
-
     // Pacing-rate relative to our target send rate.
     // Multiplicative factor that is applied to the target bitrate to calculate
     // the number of bytes that can be transmitted per interval.
@@ -136,7 +127,7 @@ impl GoogCcNetworkController {
     // below the current throughput estimate to drain the network queues.
     const PROBE_DROP_THROUGHPUT_FRACTION: f64 = 0.85;
 
-    pub fn new(config: NetworkControllerConfig, goog_cc_config: GoogCcConfig) -> Self {
+    pub fn new(config: NetworkControllerConfig, _goog_cc_config: GoogCcConfig) -> Self {
         let field_trials = config.field_trials.clone();
         let rate_control_settings = RateControlSettings::new(&field_trials);
 
@@ -145,7 +136,6 @@ impl GoogCcNetworkController {
         delay_based_bwe.set_min_bitrate(CONGESTION_CONTROLLER_MIN_BITRATE);
 
         Self {
-            packet_feedback_only: goog_cc_config.feedback_only,
             safe_reset_on_route_change: field_trials.safe_reset_on_route_change.enabled,
             safe_reset_acknowledged_rate: field_trials.safe_reset_on_route_change.ack,
             use_min_allocatable_as_lower_bound: field_trials.min_alloc_as_lower_bound,
@@ -173,9 +163,6 @@ impl GoogCcNetworkController {
             starting_rate: config.constraints.starting_rate,
             first_packet_sent: false,
             estimate: None,
-            next_loss_update: Timestamp::minus_infinity(),
-            lost_packets_since_last_loss_update: 0,
-            expected_packets_since_last_loss_update: 0,
             feedback_max_rtts: VecDeque::new(),
             last_loss_based_target_rate: config.constraints.starting_rate.unwrap(),
             last_pushback_target_rate: config.constraints.starting_rate.unwrap(),
@@ -581,17 +568,13 @@ impl NetworkControllerInterface for GoogCcNetworkController {
     }
 
     fn on_remote_bitrate_report(&mut self, msg: RemoteBitrateReport) -> NetworkControlUpdate {
-        if self.packet_feedback_only {
-            tracing::error!("Received REMB for packet feedback only GoogCC");
-            return NetworkControlUpdate::default();
-        }
         self.bandwidth_estimation
             .update_receiver_estimate(msg.receive_time, msg.bandwidth);
         NetworkControlUpdate::default()
     }
 
     fn on_round_trip_time_update(&mut self, msg: RoundTripTimeUpdate) -> NetworkControlUpdate {
-        if self.packet_feedback_only || msg.smoothed {
+        if msg.smoothed {
             return NetworkControlUpdate::default();
         }
         debug_assert!(!msg.round_trip_time.is_zero());
@@ -703,9 +686,6 @@ impl NetworkControllerInterface for GoogCcNetworkController {
     }
 
     fn on_transport_loss_report(&mut self, msg: TransportLossReport) -> NetworkControlUpdate {
-        if self.packet_feedback_only {
-            return NetworkControlUpdate::default();
-        }
         let total_packets_delta: i64 =
             msg.packets_received_delta as i64 + msg.packets_lost_delta as i64;
         self.bandwidth_estimation.update_packets_lost(
@@ -757,45 +737,6 @@ impl NetworkControllerInterface for GoogCcNetworkController {
             // TODO(srte): Use time since last unacknowledged packet.
             self.bandwidth_estimation
                 .update_propagation_rtt(report.feedback_time, min_propagation_rtt);
-        }
-        if self.packet_feedback_only {
-            if !self.feedback_max_rtts.is_empty() {
-                let sum_rtt_ms: i64 = self.feedback_max_rtts.iter().sum();
-                let mean_rtt_ms: i64 = sum_rtt_ms / self.feedback_max_rtts.len() as i64;
-                self.delay_based_bwe
-                    .on_rtt_update(TimeDelta::from_millis(mean_rtt_ms));
-            }
-
-            let mut feedback_min_rtt: TimeDelta = TimeDelta::plus_infinity();
-            for packet_feedback in report.received_with_send_info() {
-                let pending_time: TimeDelta = max_recv_time - packet_feedback.receive_time;
-                let rtt: TimeDelta =
-                    report.feedback_time - packet_feedback.sent_packet.send_time - pending_time;
-                // Value used for predicting NACK round trip time in FEC controller.
-                feedback_min_rtt = std::cmp::min(rtt, feedback_min_rtt);
-            }
-            if feedback_min_rtt.is_finite() {
-                self.bandwidth_estimation
-                    .update_rtt(feedback_min_rtt, report.feedback_time);
-            }
-
-            self.expected_packets_since_last_loss_update +=
-                report.packets_with_feedback().len() as i64;
-            for packet_feedback in report.packets_with_feedback() {
-                if !packet_feedback.is_received() {
-                    self.lost_packets_since_last_loss_update += 1;
-                }
-            }
-            if report.feedback_time > self.next_loss_update {
-                self.next_loss_update = report.feedback_time + Self::LOSS_UPDATE_INTERVAL;
-                self.bandwidth_estimation.update_packets_lost(
-                    self.lost_packets_since_last_loss_update,
-                    self.expected_packets_since_last_loss_update,
-                    report.feedback_time,
-                );
-                self.expected_packets_since_last_loss_update = 0;
-                self.lost_packets_since_last_loss_update = 0;
-            }
         }
         let alr_start_time: Option<i64> = self
             .alr_detector
@@ -1084,35 +1025,11 @@ mod test {
         target_bitrate
     }
 
-    // Create transport packets feedback with a built-up delay.
-    fn create_transport_packets_feedback(
-        per_packet_network_delay: TimeDelta,
-        one_way_delay: TimeDelta,
-        send_time: Timestamp,
-    ) -> TransportPacketsFeedback {
-        let mut delay_buildup: TimeDelta = one_way_delay;
-        const FEEDBACK_SIZE: i64 = 3;
-        const PAYLOAD_SIZE: usize = 1000;
-        let mut feedback = TransportPacketsFeedback::default();
-        for _ in 0..FEEDBACK_SIZE {
-            let packet: PacketResult = create_packet_result(
-                /*arrival_time=*/ send_time + delay_buildup,
-                send_time,
-                PAYLOAD_SIZE,
-                PacedPacketInfo::default(),
-            );
-            delay_buildup += per_packet_network_delay;
-            feedback.feedback_time = packet.receive_time + one_way_delay;
-            feedback.packet_feedbacks.push(packet);
-        }
-        feedback
-    }
-
     // Scenarios:
 
     /*
     fn UpdatesTargetRateBasedOnLinkCapacity(test_name: &str) {
-    let factory = CreateFeedbackOnlyFactory();
+    let factory = GoogCcNetworkControllerFactory::default();
       let s = Scenario::new("googcc_unit/target_capacity" + std::string(test_name), false);
       let mut config: CallClientConfig::default();
       config.transport.cc_factory = &factory;
@@ -1190,10 +1107,7 @@ mod test {
     }
     */
 
-    fn create_controller(
-        field_trials: FieldTrials,
-        feedback_only: bool,
-    ) -> GoogCcNetworkController {
+    fn create_controller(field_trials: FieldTrials) -> GoogCcNetworkController {
         let config = NetworkControllerConfig {
             field_trials,
             constraints: TargetRateConstraints {
@@ -1205,14 +1119,14 @@ mod test {
             ..Default::default()
         };
 
-        let goog_cc_config = GoogCcConfig { feedback_only };
+        let goog_cc_config = GoogCcConfig::default();
 
         GoogCcNetworkController::new(config, goog_cc_config)
     }
 
     #[test]
     fn initialize_target_rate_on_first_process_interval_after_network_available() {
-        let mut controller = create_controller(FieldTrials::default(), false);
+        let mut controller = create_controller(FieldTrials::default());
 
         let _ = controller.on_network_availability(NetworkAvailability {
             at_time: Timestamp::from_millis(123456),
@@ -1240,7 +1154,7 @@ mod test {
 
     #[test]
     fn reacts_to_changed_network_conditions() {
-        let mut controller = create_controller(FieldTrials::default(), false);
+        let mut controller = create_controller(FieldTrials::default());
         let mut current_time: Timestamp = Timestamp::from_millis(123);
         controller.on_network_availability(NetworkAvailability {
             at_time: current_time,
@@ -1284,7 +1198,7 @@ mod test {
 
     #[test]
     fn on_network_route_changed() {
-        let mut controller = create_controller(FieldTrials::default(), false);
+        let mut controller = create_controller(FieldTrials::default());
         let current_time: Timestamp = Timestamp::from_millis(123);
         controller.on_network_availability(NetworkAvailability {
             at_time: current_time,
@@ -1321,7 +1235,7 @@ mod test {
 
     #[test]
     fn probe_on_route_change() {
-        let mut controller = create_controller(FieldTrials::default(), false);
+        let mut controller = create_controller(FieldTrials::default());
         let mut current_time: Timestamp = Timestamp::from_millis(123);
         controller.on_network_availability(NetworkAvailability {
             at_time: current_time,
@@ -1356,7 +1270,7 @@ mod test {
 
     #[test]
     fn probe_after_route_change_when_transport_writable() {
-        let mut controller = create_controller(FieldTrials::default(), false);
+        let mut controller = create_controller(FieldTrials::default());
         let current_time: Timestamp = Timestamp::from_millis(123);
 
         let mut update: NetworkControlUpdate =
@@ -1387,7 +1301,7 @@ mod test {
     // Feedbacks which show an increasing delay cause the estimation to be reduced.
     #[test]
     fn updates_delay_based_estimate() {
-        let mut controller = create_controller(FieldTrials::default(), false);
+        let mut controller = create_controller(FieldTrials::default());
         const RUN_TIME_MS: i64 = 6000;
         let mut current_time: Timestamp = Timestamp::from_millis(123);
         controller.on_network_availability(NetworkAvailability {
@@ -1423,7 +1337,7 @@ mod test {
             limit_pacing_factor_by_upper_link_capacity_estimate: true,
             ..Default::default()
         };
-        let mut controller = create_controller(field_trials, false);
+        let mut controller = create_controller(field_trials);
         let mut current_time: Timestamp = Timestamp::from_millis(123);
         controller.on_network_availability(NetworkAvailability {
             at_time: current_time,
@@ -1466,7 +1380,7 @@ mod test {
     /*
     #[test]
     fn CongestionWindowPushbackOnNetworkDelay() {
-    let factory = CreateFeedbackOnlyFactory();
+    let factory = GoogCcNetworkControllerFactory::default();
           let field_trials = FieldTrials {
            congestion_window: experiments::CongestionWindowConfig { queue_size_ms: 800, min_bitrate_bps: 30000, ..Default::default() }
            ..Default::default()
@@ -1505,7 +1419,7 @@ mod test {
     // Test congestion window pushback on network delay happens.
     #[test]
     fn CongestionWindowPushbackDropFrameOnNetworkDelay() {
-    let factory = CreateFeedbackOnlyFactory();
+    let factory = GoogCcNetworkControllerFactory::default();
           let field_trials = FieldTrials {
            congestion_window: experiments::CongestionWindowConfig { queue_size_ms: 800, min_bitrate_bps: 30000, drop_frame: true, ..Default::default() }
            ..Default::default()
@@ -1631,7 +1545,7 @@ mod test {
     /*
     #[test]
     fn StableEstimateDoesNotVaryInSteadyState() {
-    let factory = CreateFeedbackOnlyFactory();
+    let factory = GoogCcNetworkControllerFactory::default();
       let s = Scenario::new("googcc_unit/stable_target", false);
       let mut config = CallClientConfig::default();
       config.transport.cc_factory = &factory;
@@ -2064,29 +1978,4 @@ mod test {
       EXPECT_LE(client.target_rate().kbps(), 300);
     }
     */
-
-    #[test]
-    fn calculates_rtt_from_transport_feedback() {
-        let mut controller = create_controller(FieldTrials::default(), true);
-        let mut current_time: Timestamp = Timestamp::from_millis(123);
-        let one_way_delay: TimeDelta = TimeDelta::from_millis(10);
-        let mut rtt: Option<TimeDelta> = None;
-
-        let feedback: TransportPacketsFeedback = create_transport_packets_feedback(
-            /*per_packet_network_delay=*/ TimeDelta::from_millis(50),
-            one_way_delay,
-            /*send_time=*/ current_time,
-        );
-        controller.on_transport_packets_feedback(feedback);
-        current_time += TimeDelta::from_millis(50);
-        let update = controller.on_process_interval(ProcessInterval {
-            at_time: current_time,
-            ..Default::default()
-        });
-        if let Some(target_rate) = update.target_rate {
-            rtt = Some(target_rate.network_estimate.round_trip_time);
-        }
-        assert!(rtt.is_some());
-        assert_eq!(rtt.unwrap().ms(), 2 * one_way_delay.ms());
-    }
 }
