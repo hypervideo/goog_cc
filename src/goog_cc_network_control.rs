@@ -321,7 +321,7 @@ impl GoogCcNetworkController {
             self.last_loss_base_state = loss_based_state;
 
             self.alr_detector
-                .set_estimated_bitrate(loss_based_target_rate.bps());
+                .set_estimated_bitrate(loss_based_target_rate);
 
             let bwe_period: TimeDelta = self.delay_based_bwe.get_expected_bwe_period();
 
@@ -521,10 +521,10 @@ impl NetworkControllerInterface for GoogCcNetworkController {
             congestion_window_pushback_controller.update_pacing_queue(pacer_queue.bytes())
         };
         self.bandwidth_estimation.update_estimate(msg.at_time);
-        let start_time_ms: Option<i64> = self
-            .alr_detector
-            .get_application_limited_region_start_time();
-        self.probe_controller.set_alr_start_time_ms(start_time_ms);
+        self.probe_controller.set_alr_start_time(
+            self.alr_detector
+                .get_application_limited_region_start_time(),
+        );
 
         let mut probes = self.probe_controller.process(msg.at_time);
         update.probe_cluster_configs.append(&mut probes);
@@ -580,7 +580,7 @@ impl NetworkControllerInterface for GoogCcNetworkController {
 
     fn on_sent_packet(&mut self, sent_packet: SentPacket) -> NetworkControlUpdate {
         self.alr_detector
-            .on_bytes_sent(sent_packet.size.bytes() as _, sent_packet.send_time.ms());
+            .on_bytes_sent(sent_packet.size, sent_packet.send_time);
         self.acknowledged_bitrate_estimator.set_alr(
             self.alr_detector
                 .get_application_limited_region_start_time()
@@ -729,15 +729,14 @@ impl NetworkControllerInterface for GoogCcNetworkController {
             self.bandwidth_estimation
                 .update_propagation_rtt(report.feedback_time, min_propagation_rtt);
         }
-        let alr_start_time: Option<i64> = self
+        let alr_start_time: Option<Timestamp> = self
             .alr_detector
             .get_application_limited_region_start_time();
-
         if self.previously_in_alr && alr_start_time.is_none() {
-            let now_ms: i64 = report.feedback_time.ms();
             self.acknowledged_bitrate_estimator
                 .set_alr_ended_time(report.feedback_time);
-            self.probe_controller.set_alr_ended_time_ms(now_ms);
+            self.probe_controller
+                .set_alr_ended_time(report.feedback_time);
         }
         self.previously_in_alr = alr_start_time.is_some();
         self.acknowledged_bitrate_estimator
@@ -819,7 +818,7 @@ impl NetworkControllerInterface for GoogCcNetworkController {
         let recovered_from_overuse = result.recovered_from_overuse;
 
         if recovered_from_overuse {
-            self.probe_controller.set_alr_start_time_ms(alr_start_time);
+            self.probe_controller.set_alr_start_time(alr_start_time);
             let mut probes = self.probe_controller.request_probe(report.feedback_time);
             update.probe_cluster_configs.append(&mut probes);
         }

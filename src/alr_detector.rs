@@ -8,7 +8,11 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
-use crate::{experiments::AlrExperimentSettings, pacing::IntervalBudget};
+use crate::{
+    api::units::{DataRate, DataSize, TimeDelta, Timestamp},
+    experiments::AlrExperimentSettings,
+    pacing::IntervalBudget,
+};
 use web_time::Instant;
 
 #[derive(Clone, Debug)]
@@ -46,12 +50,12 @@ impl Default for AlrDetectorConfig {
 pub struct AlrDetector {
     conf: AlrDetectorConfig,
 
-    last_send_time_ms: Option<i64>,
+    last_send_time: Option<Timestamp>,
 
     alr_budget: IntervalBudget,
-    alr_started_time_ms: Option<i64>,
+    alr_started_time: Option<Timestamp>,
 
-    // Replacement for rtc_time
+    // Replacement for the environment's clock.
     start: Instant,
 }
 
@@ -65,56 +69,56 @@ impl AlrDetector {
     pub fn new(conf: AlrDetectorConfig) -> Self {
         Self {
             conf,
-            last_send_time_ms: None,
+            last_send_time: None,
             alr_budget: IntervalBudget::new(0, true),
-            alr_started_time_ms: None,
+            alr_started_time: None,
             start: Instant::now(),
         }
     }
 
-    pub fn on_bytes_sent(&mut self, bytes_sent: usize, send_time_ms: i64) {
-        let last_send_time_ms = match self.last_send_time_ms {
+    pub fn on_bytes_sent(&mut self, bytes_sent: DataSize, send_time: Timestamp) {
+        let last_send_time = match self.last_send_time {
             Some(v) => v,
             None => {
                 // Since the duration for sending the bytes is unknwon, return without
                 // updating alr state.
-                self.last_send_time_ms = Some(send_time_ms);
+                self.last_send_time = Some(send_time);
                 return;
             }
         };
 
-        let delta_time_ms = send_time_ms - last_send_time_ms;
-        self.last_send_time_ms = Some(send_time_ms);
+        let delta_time: TimeDelta = send_time - last_send_time;
+        self.last_send_time = Some(send_time);
 
-        self.alr_budget.use_budget(bytes_sent);
-        self.alr_budget.increase_budget(delta_time_ms);
+        self.alr_budget.use_budget(bytes_sent.bytes() as usize);
+        self.alr_budget.increase_budget(delta_time.ms());
         if self.alr_budget.budget_ratio() > self.conf.start_budget_level_ratio
-            && self.alr_started_time_ms.is_none()
+            && self.alr_started_time.is_none()
         {
-            self.alr_started_time_ms
-                .replace(self.start.elapsed().as_millis() as i64);
+            self.alr_started_time = Some(Timestamp::from_micros(
+                self.start.elapsed().as_micros() as i64
+            ));
         } else if self.alr_budget.budget_ratio() < self.conf.stop_budget_level_ratio
-            && self.alr_started_time_ms.is_some()
+            && self.alr_started_time.is_some()
         {
-            self.alr_started_time_ms.take();
+            self.alr_started_time = None;
         }
     }
 
     // Set current estimated bandwidth.
-    pub fn set_estimated_bitrate(&mut self, bitrate_bps: i64) {
-        debug_assert!(bitrate_bps > 0);
-        if bitrate_bps <= 0 {
+    pub fn set_estimated_bitrate(&mut self, bitrate: DataRate) {
+        debug_assert!(bitrate > DataRate::zero());
+        if bitrate <= DataRate::zero() {
             return;
         }
-        let target_rate_kbps: i64 =
-            (bitrate_bps as f64 * self.conf.bandwidth_usage_ratio / 1000.0) as i64;
-        self.alr_budget.set_target_rate_kbps(target_rate_kbps);
+        self.alr_budget
+            .set_target_rate_kbps((bitrate * self.conf.bandwidth_usage_ratio).kbps());
     }
 
-    // Returns time in milliseconds when the current application-limited region
-    // started or empty result if the sender is currently not application-limited.
-    pub fn get_application_limited_region_start_time(&self) -> Option<i64> {
-        self.alr_started_time_ms
+    // Returns time when the current application-limited region started or empty
+    // result if the sender is currently not application-limited.
+    pub fn get_application_limited_region_start_time(&self) -> Option<Timestamp> {
+        self.alr_started_time
     }
 }
 
@@ -122,67 +126,62 @@ impl AlrDetector {
 mod test {
     use super::*;
 
-    const ESTIMATED_BITRATE_BPS: i64 = 300000;
+    const ESTIMATED_BITRATE: DataRate = DataRate::from_bits_per_sec(300_000);
 
     pub struct SimulateOutgoingTrafficIn<'a> {
         alr_detector: &'a mut AlrDetector,
-        timestamp_ms: &'a mut i64,
-        interval_ms: Option<i64>,
+        clock: &'a mut Timestamp,
+        interval: Option<TimeDelta>,
         usage_percentage: Option<i64>,
     }
 
     impl<'a> SimulateOutgoingTrafficIn<'a> {
-        pub fn new(alr_detector: &'a mut AlrDetector, timestamp_ms: &'a mut i64) -> Self {
+        pub fn new(alr_detector: &'a mut AlrDetector, clock: &'a mut Timestamp) -> Self {
             Self {
                 alr_detector,
-                timestamp_ms,
-                interval_ms: None,
+                clock,
+                interval: None,
                 usage_percentage: None,
             }
         }
 
-        pub fn for_time_ms(mut self, time_ms: i64) -> Self {
-            self.interval_ms.replace(time_ms);
+        pub fn for_time(mut self, time: TimeDelta) -> Self {
+            self.interval.replace(time);
+            self.produce_traffic();
             self
         }
 
-        pub fn at_percent_of_estimated_bitrate(mut self, usage_percentage: i64) {
+        pub fn at_percent_of_estimated_bitrate(mut self, usage_percentage: i64) -> Self {
             self.usage_percentage.replace(usage_percentage);
             self.produce_traffic();
+            self
         }
 
         fn produce_traffic(&mut self) {
-            let interval_ms = self.interval_ms.unwrap();
-            let usage_percentage = self.usage_percentage.unwrap();
-            const TIME_STEP_MS: i64 = 10;
-            let mut t: i64 = 0;
-
-            while t < interval_ms {
-                *self.timestamp_ms += TIME_STEP_MS;
+            let (Some(interval), Some(usage_percentage)) = (self.interval, self.usage_percentage)
+            else {
+                return;
+            };
+            const TIME_STEP: TimeDelta = TimeDelta::from_millis(10);
+            let mut t = TimeDelta::zero();
+            while t < interval {
+                *self.clock += TIME_STEP;
                 self.alr_detector.on_bytes_sent(
-                    (ESTIMATED_BITRATE_BPS * usage_percentage * TIME_STEP_MS / (8 * 100 * 1000))
-                        as usize,
-                    *self.timestamp_ms,
+                    ESTIMATED_BITRATE * usage_percentage * TIME_STEP / 100,
+                    *self.clock,
                 );
-                t += TIME_STEP_MS;
+                t += TIME_STEP;
             }
-            let remainder_ms: i64 = interval_ms % TIME_STEP_MS;
-            if remainder_ms > 0 {
-                *self.timestamp_ms += TIME_STEP_MS;
-                self.alr_detector.on_bytes_sent(
-                    (ESTIMATED_BITRATE_BPS * usage_percentage * remainder_ms / (8 * 100 * 1000))
-                        as usize,
-                    *self.timestamp_ms,
-                );
-            }
+            // As of now all tests use interval that is a multiple of 10ms.
+            debug_assert_eq!(interval.ms() % TIME_STEP.ms(), 0);
         }
     }
 
     #[test]
     fn alr_detection() {
-        let mut timestamp_ms: i64 = 1000;
+        let mut clock = Timestamp::from_seconds(1);
         let mut alr_detector = AlrDetector::default();
-        alr_detector.set_estimated_bitrate(ESTIMATED_BITRATE_BPS);
+        alr_detector.set_estimated_bitrate(ESTIMATED_BITRATE);
 
         // Start in non-ALR state.
         assert!(alr_detector
@@ -190,118 +189,98 @@ mod test {
             .is_none());
 
         // Stay in non-ALR state when usage is close to 100%.
-        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut timestamp_ms)
-            .for_time_ms(1000)
+        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut clock)
+            .for_time(TimeDelta::from_seconds(1))
             .at_percent_of_estimated_bitrate(90);
         assert!(alr_detector
             .get_application_limited_region_start_time()
             .is_none());
 
         // Verify that we ALR starts when bitrate drops below 20%.
-        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut timestamp_ms)
-            .for_time_ms(1500)
+        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut clock)
+            .for_time(TimeDelta::from_millis(1_500))
             .at_percent_of_estimated_bitrate(20);
-        assert!(
-            (alr_detector
-                .get_application_limited_region_start_time()
-                .is_some())
-        );
+        assert!(alr_detector
+            .get_application_limited_region_start_time()
+            .is_some());
 
         // Verify that ALR ends when usage is above 65%.
-        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut timestamp_ms)
-            .for_time_ms(4000)
+        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut clock)
+            .for_time(TimeDelta::from_seconds(4))
             .at_percent_of_estimated_bitrate(100);
-        assert!(
-            (alr_detector
-                .get_application_limited_region_start_time()
-                .is_none())
-        );
+        assert!(alr_detector
+            .get_application_limited_region_start_time()
+            .is_none());
     }
 
     #[test]
     fn short_spike() {
-        let mut timestamp_ms: i64 = 1000;
+        let mut clock = Timestamp::from_seconds(1);
         let mut alr_detector = AlrDetector::default();
-        alr_detector.set_estimated_bitrate(ESTIMATED_BITRATE_BPS);
+        alr_detector.set_estimated_bitrate(ESTIMATED_BITRATE);
         // Start in non-ALR state.
-        assert!(
-            (alr_detector
-                .get_application_limited_region_start_time()
-                .is_none())
-        );
+        assert!(alr_detector
+            .get_application_limited_region_start_time()
+            .is_none());
 
         // Verify that we ALR starts when bitrate drops below 20%.
-        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut timestamp_ms)
-            .for_time_ms(1000)
+        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut clock)
+            .for_time(TimeDelta::from_seconds(1))
             .at_percent_of_estimated_bitrate(20);
-        assert!(
-            (alr_detector
-                .get_application_limited_region_start_time()
-                .is_some())
-        );
+        assert!(alr_detector
+            .get_application_limited_region_start_time()
+            .is_some());
 
         // Verify that we stay in ALR region even after a short bitrate spike.
-        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut timestamp_ms)
-            .for_time_ms(100)
+        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut clock)
+            .for_time(TimeDelta::from_millis(100))
             .at_percent_of_estimated_bitrate(150);
-        assert!(
-            (alr_detector
-                .get_application_limited_region_start_time()
-                .is_some())
-        );
+        assert!(alr_detector
+            .get_application_limited_region_start_time()
+            .is_some());
 
         // ALR ends when usage is above 65%.
-        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut timestamp_ms)
-            .for_time_ms(3000)
+        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut clock)
+            .for_time(TimeDelta::from_seconds(3))
             .at_percent_of_estimated_bitrate(100);
-        assert!(
-            (alr_detector
-                .get_application_limited_region_start_time()
-                .is_none())
-        );
+        assert!(alr_detector
+            .get_application_limited_region_start_time()
+            .is_none());
     }
 
     #[test]
     fn bandwidth_estimate_changes() {
-        let mut timestamp_ms: i64 = 1000;
+        let mut clock = Timestamp::from_seconds(1);
         let mut alr_detector = AlrDetector::default();
-        alr_detector.set_estimated_bitrate(ESTIMATED_BITRATE_BPS);
+        alr_detector.set_estimated_bitrate(ESTIMATED_BITRATE);
 
         // Start in non-ALR state.
-        assert!(
-            (alr_detector
-                .get_application_limited_region_start_time()
-                .is_none())
-        );
+        assert!(alr_detector
+            .get_application_limited_region_start_time()
+            .is_none());
 
         // ALR starts when bitrate drops below 20%.
-        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut timestamp_ms)
-            .for_time_ms(1000)
+        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut clock)
+            .for_time(TimeDelta::from_seconds(1))
             .at_percent_of_estimated_bitrate(20);
-        assert!(
-            (alr_detector
-                .get_application_limited_region_start_time()
-                .is_some())
-        );
+        assert!(alr_detector
+            .get_application_limited_region_start_time()
+            .is_some());
 
         // When bandwidth estimate drops the detector should stay in ALR mode and quit
         // it shortly afterwards as the sender continues sending the same amount of
         // traffic. This is necessary to ensure that ProbeController can still react
         // to the BWE drop by initiating a new probe.
-        alr_detector.set_estimated_bitrate(ESTIMATED_BITRATE_BPS / 5);
-        assert!(
-            (alr_detector
-                .get_application_limited_region_start_time()
-                .is_some())
-        );
-        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut timestamp_ms)
-            .for_time_ms(1000)
+        alr_detector.set_estimated_bitrate(ESTIMATED_BITRATE / 5);
+        assert!(alr_detector
+            .get_application_limited_region_start_time()
+            .is_some());
+        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut clock)
+            .for_time(TimeDelta::from_seconds(1))
             .at_percent_of_estimated_bitrate(50);
-        assert!(
-            (alr_detector
-                .get_application_limited_region_start_time()
-                .is_none())
-        );
+        assert!(alr_detector
+            .get_application_limited_region_start_time()
+            .is_none());
     }
 
     #[test]
@@ -311,37 +290,31 @@ mod test {
             start_budget_level_ratio: 0.0,
             stop_budget_level_ratio: -0.10,
         };
+        let mut clock = Timestamp::from_seconds(1);
         let mut alr_detector = AlrDetector::new(config);
-        let mut timestamp_ms: i64 = 1000;
-        alr_detector.set_estimated_bitrate(ESTIMATED_BITRATE_BPS);
+        alr_detector.set_estimated_bitrate(ESTIMATED_BITRATE);
 
         // Start in non-ALR state.
-        assert!(
-            (alr_detector
-                .get_application_limited_region_start_time()
-                .is_none())
-        );
+        assert!(alr_detector
+            .get_application_limited_region_start_time()
+            .is_none());
 
         // ALR does not start at 100% utilization.
-        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut timestamp_ms)
-            .for_time_ms(1000)
+        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut clock)
+            .for_time(TimeDelta::from_seconds(1))
             .at_percent_of_estimated_bitrate(100);
-        assert!(
-            (alr_detector
-                .get_application_limited_region_start_time()
-                .is_none())
-        );
+        assert!(alr_detector
+            .get_application_limited_region_start_time()
+            .is_none());
 
         // ALR does start at 85% utilization.
         // Overused 10% above so it should take about 2s to reach a budget level of
         // 0%.
-        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut timestamp_ms)
-            .for_time_ms(2100)
+        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut clock)
+            .for_time(TimeDelta::from_millis(2_100))
             .at_percent_of_estimated_bitrate(85);
-        assert!(
-            (alr_detector
-                .get_application_limited_region_start_time()
-                .is_some())
-        );
+        assert!(alr_detector
+            .get_application_limited_region_start_time()
+            .is_some());
     }
 }
