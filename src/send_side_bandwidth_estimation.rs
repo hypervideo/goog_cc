@@ -671,12 +671,6 @@ impl SendSideBandwidthEstimation {
             self.update_estimate(report.feedback_time);
         }
     }
-    pub fn pace_at_loss_based_estimate(&self) -> bool {
-        self.loss_based_bandwidth_estimator_v2_ready_for_use()
-            && self
-                .loss_based_bandwidth_estimator_v2
-                .pace_at_loss_based_estimate()
-    }
 
     fn is_in_start_phase(&self, at_time: Timestamp) -> bool {
         self.first_report_time.is_infinite() || at_time - self.first_report_time < Self::START_PHASE
