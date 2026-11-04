@@ -214,9 +214,7 @@ impl GoogCcNetworkController {
     /// goog_cc's own per-cluster probe observations, as computed by the internal
     /// [`ProbeBitrateEstimator`] while processing transport feedback. Exposed
     /// read-only for observability; reading it does not affect the estimate.
-    pub fn probe_cluster_observations(
-        &self,
-    ) -> impl Iterator<Item = &ProbeClusterObservation> {
+    pub fn probe_cluster_observations(&self) -> impl Iterator<Item = &ProbeClusterObservation> {
         self.probe_bitrate_estimator.probe_cluster_observations()
     }
 

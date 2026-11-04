@@ -311,9 +311,7 @@ impl ProbeBitrateEstimator {
     /// lockstep with the internal cluster history (erased after
     /// [`Self::MAX_CLUSTER_HISTORY`]). Purely observational; consuming it does
     /// not affect the estimate.
-    pub fn probe_cluster_observations(
-        &self,
-    ) -> impl Iterator<Item = &ProbeClusterObservation> {
+    pub fn probe_cluster_observations(&self) -> impl Iterator<Item = &ProbeClusterObservation> {
         self.cluster_observations.values()
     }
 
