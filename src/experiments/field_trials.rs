@@ -77,9 +77,6 @@ pub struct FieldTrials {
     /// WebRTC-Bwe-LimitProbesLowerThanThroughputEstimate
     pub limit_probes_lower_than_throughput_estimate: bool,
 
-    /// WebRTC-Bwe-PaceAtMaxOfBweAndLowerLinkCapacity
-    pub pace_at_max_of_bwe_and_lower_link_capacity: bool,
-
     /// WebRTC-Bwe-LimitPacingFactorByUpperLinkCapacityEstimate
     pub limit_pacing_factor_by_upper_link_capacity_estimate: bool,
 
@@ -119,7 +116,6 @@ impl Default for FieldTrials {
             min_alloc_as_lower_bound: true,
             ignore_probes_lower_than_network_state_estimate: true,
             limit_probes_lower_than_throughput_estimate: true,
-            pace_at_max_of_bwe_and_lower_link_capacity: false,
             limit_pacing_factor_by_upper_link_capacity_estimate: false,
             safe_reset_on_route_change: SafeResetOnRouteChange::default(),
             bwe_throughput_window_config: BitrateEstimatorConfig::default(),

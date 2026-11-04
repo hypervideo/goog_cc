@@ -74,7 +74,6 @@ pub struct GoogCcNetworkController {
     ignore_probes_lower_than_network_estimate: bool,
     limit_probes_lower_than_throughput_estimate: bool,
     rate_control_settings: RateControlSettings,
-    pace_at_max_of_bwe_and_lower_link_capacity: bool,
     limit_pacingfactor_by_upper_link_capacity_estimate: bool,
 
     probe_controller: ProbeController,
@@ -154,8 +153,6 @@ impl GoogCcNetworkController {
                 .ignore_probes_lower_than_network_state_estimate,
             limit_probes_lower_than_throughput_estimate: field_trials
                 .limit_probes_lower_than_throughput_estimate,
-            pace_at_max_of_bwe_and_lower_link_capacity: field_trials
-                .pace_at_max_of_bwe_and_lower_link_capacity,
             limit_pacingfactor_by_upper_link_capacity_estimate: field_trials
                 .limit_pacing_factor_by_upper_link_capacity_estimate,
 
@@ -399,27 +396,10 @@ impl GoogCcNetworkController {
     fn get_pacing_rates(&self, at_time: Timestamp) -> PacerConfig {
         // Pacing rate is based on target rate before congestion window pushback,
         // because we don't want to build queues in the pacer when pushback occurs.
-        let mut pacing_rate = match self.estimate {
-            Some(estimate)
-                if self.pace_at_max_of_bwe_and_lower_link_capacity
-                    && !self.bandwidth_estimation.pace_at_loss_based_estimate() =>
-            {
-                *[
-                    self.min_total_allocated_bitrate,
-                    estimate.link_capacity_lower,
-                    self.last_loss_based_target_rate,
-                ]
-                .iter()
-                .max()
-                .unwrap()
-                    * self.pacing_factor
-            }
-            _ => {
-                self.min_total_allocated_bitrate
-                    .max(self.last_loss_based_target_rate)
-                    * self.pacing_factor
-            }
-        };
+        let mut pacing_rate = self
+            .min_total_allocated_bitrate
+            .max(self.last_loss_based_target_rate)
+            * self.pacing_factor;
 
         match self.estimate {
             Some(estimate)
@@ -1437,83 +1417,6 @@ mod test {
             &mut current_time,
         );
         assert!(target_bitrate_after_delay.unwrap() < target_bitrate_before_delay.unwrap());
-    }
-
-    #[test]
-    fn pace_at_max_of_lower_link_capacity_and_bwe() {
-        let field_trials = FieldTrials {
-            pace_at_max_of_bwe_and_lower_link_capacity: true,
-            ..Default::default()
-        };
-        let mut controller = create_controller(field_trials, false);
-        let mut current_time: Timestamp = Timestamp::from_millis(123);
-        controller.on_network_availability(NetworkAvailability {
-            at_time: current_time,
-            network_available: true,
-        });
-        controller.on_process_interval(ProcessInterval {
-            at_time: current_time,
-            ..Default::default()
-        });
-        current_time += TimeDelta::from_millis(100);
-        let mut network_estimate: NetworkStateEstimate = NetworkStateEstimate {
-            link_capacity_lower: 10 * INITIAL_BITRATE,
-            ..Default::default()
-        };
-        controller.set_network_state_estimate(Some(network_estimate));
-        // OnNetworkStateEstimate does not trigger processing a new estimate. So add a
-        // dummy loss report to trigger a BWE update in the next process interval.
-        let loss_report = TransportLossReport {
-            start_time: current_time,
-            end_time: current_time,
-            receive_time: current_time,
-            packets_received_delta: 50,
-            packets_lost_delta: 1,
-        };
-        controller.on_transport_loss_report(loss_report);
-        let update = controller.on_process_interval(ProcessInterval {
-            at_time: current_time,
-            ..Default::default()
-        });
-        assert!(update.pacer_config.is_some());
-        assert!(update.target_rate.is_some());
-        assert!(update.target_rate.unwrap().target_rate < network_estimate.link_capacity_lower);
-        assert_eq!(
-            update.pacer_config.unwrap().data_rate().kbps_float(),
-            network_estimate.link_capacity_lower.kbps_float() * DEFAULT_PACING_RATE
-        );
-
-        current_time += TimeDelta::from_millis(100);
-        // Set a low link capacity estimate and verify that pacing rate is set
-        // relative to loss based/delay based estimate.
-        network_estimate = NetworkStateEstimate {
-            link_capacity_lower: 0.5 * INITIAL_BITRATE,
-            ..Default::default()
-        };
-        controller.set_network_state_estimate(Some(network_estimate));
-        // Again, we need to inject a dummy loss report to trigger an update of the
-        // BWE in the next process interval.
-        let loss_report = TransportLossReport {
-            start_time: current_time,
-            end_time: current_time,
-            receive_time: current_time,
-            packets_received_delta: 50,
-            packets_lost_delta: 0,
-        };
-        controller.on_transport_loss_report(loss_report);
-        let update = controller.on_process_interval(ProcessInterval {
-            at_time: current_time,
-            ..Default::default()
-        });
-        assert!(update.target_rate.is_some());
-        assert!(
-            update.target_rate.as_ref().unwrap().target_rate > network_estimate.link_capacity_lower
-        );
-        // NOTE: These are off by 4 bps
-        assert_eq!(
-            update.pacer_config.unwrap().data_rate().kbps(),
-            (update.target_rate.unwrap().target_rate * DEFAULT_PACING_RATE).kbps(),
-        );
     }
 
     #[test]
