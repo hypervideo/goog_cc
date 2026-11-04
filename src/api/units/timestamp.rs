@@ -69,6 +69,10 @@ impl Timestamp {
         self.to_value_float()
     }
 
+    pub const fn ns(&self) -> i64 {
+        self.to_multiple(1000)
+    }
+
     pub const fn seconds_or(&self, fallback_value: i64) -> i64 {
         self.to_fraction_or(1_000_000, fallback_value)
     }
@@ -216,6 +220,7 @@ mod test {
         assert_eq!(TIMESTAMP_SECONDS.seconds(), VALUE);
         assert_eq!(TIMESTAMP_MS.ms(), VALUE);
         assert_eq!(TIMESTAMP_US.us(), VALUE);
+        assert_eq!(TIMESTAMP_US.ns(), VALUE * 1000);
     }
 
     #[test]
