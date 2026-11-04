@@ -601,20 +601,21 @@ impl ProbeController {
         };
 
         match self.network_estimate {
-            Some(network_estimate) if network_estimate.link_capacity_upper.is_finite() => {
-                if self.config.network_state_interval.is_finite() {
-                    if network_estimate.link_capacity_upper.is_zero() {
-                        tracing::debug!("Not sending probe, Network state estimate is zero");
-                        return vec![];
-                    }
-                    max_probe_bitrate = std::cmp::min(
-                        max_probe_bitrate,
-                        std::cmp::max(
-                            self.estimated_bitrate,
-                            network_estimate.link_capacity_upper * self.config.network_state_scale,
-                        ),
-                    );
+            Some(network_estimate)
+                if network_estimate.link_capacity_upper.is_finite()
+                    && self.config.network_state_interval.is_finite() =>
+            {
+                if network_estimate.link_capacity_upper.is_zero() {
+                    tracing::debug!("Not sending probe, Network state estimate is zero");
+                    return vec![];
                 }
+                max_probe_bitrate = std::cmp::min(
+                    max_probe_bitrate,
+                    std::cmp::max(
+                        self.estimated_bitrate,
+                        network_estimate.link_capacity_upper * self.config.network_state_scale,
+                    ),
+                );
             }
             _ => (),
         };

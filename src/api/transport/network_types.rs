@@ -344,7 +344,7 @@ impl TransportPacketsFeedback {
 
     pub fn sorted_by_receive_time(&self) -> Vec<PacketResult> {
         let mut res: Vec<PacketResult> = self.received_with_send_info().cloned().collect();
-        res.sort_by(|a, b| a.receive_time.cmp(&b.receive_time));
+        res.sort_by_key(|a| a.receive_time);
         res
     }
 }

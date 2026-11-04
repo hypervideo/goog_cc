@@ -491,8 +491,6 @@ mod test {
 
     use approx::assert_relative_eq;
 
-    use super::*;
-
     relative_unit!(TestUnit);
 
     impl TestUnit {

@@ -1347,7 +1347,7 @@ impl LossBasedBweV2 {
             return DataRate::zero();
         }
         sending_rates.sort();
-        if sending_rates.len() % 2 == 0 {
+        if sending_rates.len().is_multiple_of(2) {
             return (sending_rates[sending_rates.len() / 2 - 1]
                 + sending_rates[sending_rates.len() / 2])
                 / 2;

@@ -846,10 +846,12 @@ mod test {
         if cfg!(debug_assertions) {
             return;
         }
-        let mut aimd_rate_control = AimdRateControl::default();
-        aimd_rate_control.bitrate_is_initialized = true;
-        aimd_rate_control.current_bitrate = DataRate::zero();
-        aimd_rate_control.latest_estimated_throughput = CONGESTION_CONTROLLER_MIN_BITRATE;
+        let mut aimd_rate_control = AimdRateControl {
+            bitrate_is_initialized: true,
+            current_bitrate: DataRate::zero(),
+            latest_estimated_throughput: CONGESTION_CONTROLLER_MIN_BITRATE,
+            ..Default::default()
+        };
         aimd_rate_control
             .link_capacity
             .on_overuse_detected(CONGESTION_CONTROLLER_MIN_BITRATE);
