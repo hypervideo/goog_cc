@@ -759,11 +759,9 @@ impl LossBasedBweV2 {
         if self.config.bound_best_candidate
             && bounded_bandwidth_estimate < best_candidate.loss_limited_bandwidth
         {
-            tracing::debug!(
-                "Resetting loss based BWE to {:?} due to loss. Avg loss rate: {:?}",
-                bounded_bandwidth_estimate,
-                self.average_reported_loss_ratio
-            );
+            // If network is lossy, cap the best estimate by the instant upper bound,
+            // e.g. 450kbps if loss rate is 50%.
+            // Otherwise, cap the estimate by the delay-based estimate or max_bitrate.
             self.current_best_estimate.loss_limited_bandwidth = bounded_bandwidth_estimate;
             self.current_best_estimate.inherent_loss = 0.0;
         } else {
@@ -819,9 +817,10 @@ impl LossBasedBweV2 {
                 && self.config.hold_duration_factor > 0.0
             {
                 tracing::debug!(
-                    "Switch to HOLD. Bounded BWE: {:?}, duration: {:?}",
+                    "Switch to HOLD. Bounded BWE: {:?}, duration: {:?}, avg loss rate: {:?}",
                     bounded_bandwidth_estimate,
-                    self.last_hold_info.duration
+                    self.last_hold_info.duration,
+                    self.average_reported_loss_ratio
                 );
                 self.last_hold_info = HoldInfo {
                     timestamp: self.last_send_time_most_recent_observation
