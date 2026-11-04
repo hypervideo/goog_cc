@@ -43,7 +43,6 @@ mod delay_increase_detector_interface;
 mod goog_cc_network_control;
 mod inter_arrival_delta;
 mod link_capacity_estimator;
-mod loss_based_bandwidth_estimation;
 mod loss_based_bwe_v2;
 mod pacing;
 mod probe_bitrate_estimator;
@@ -62,7 +61,6 @@ use delay_based_bwe::*;
 use delay_increase_detector_interface::*;
 use inter_arrival_delta::*;
 use link_capacity_estimator::*;
-use loss_based_bandwidth_estimation::*;
 use loss_based_bwe_v2::*;
 use probe_controller::*;
 use robust_throughput_estimator::*;
@@ -78,9 +76,8 @@ pub use probe_bitrate_estimator::{
 pub use {
     alr_detector::AlrDetectorConfig, bitrate_estimator::BitrateEstimatorConfig,
     delay_based_bwe::BweSeparateAudioPacketsSettings,
-    goog_cc_network_control::SafeResetOnRouteChange,
-    loss_based_bandwidth_estimation::LossBasedControlConfig,
-    loss_based_bwe_v2::LossBasedBweV2Config, probe_controller::ProbeControllerConfig,
+    goog_cc_network_control::SafeResetOnRouteChange, loss_based_bwe_v2::LossBasedBweV2Config,
+    probe_controller::ProbeControllerConfig,
     robust_throughput_estimator::RobustThroughputEstimatorSettings,
     send_side_bandwidth_estimation::BweLossExperiment,
     send_side_bandwidth_estimation::RttBasedBackoffConfig,

@@ -3,9 +3,8 @@ use super::{AlrExperimentSettings, CongestionWindowConfig, VideoRateControlConfi
 use crate::{
     remote_bitrate_estimator::{BweBackOffFactor, EstimateBoundedIncrease},
     AlrDetectorConfig, BitrateEstimatorConfig, BweLossExperiment, BweSeparateAudioPacketsSettings,
-    LossBasedBweV2Config, LossBasedControlConfig, ProbeControllerConfig,
-    RobustThroughputEstimatorSettings, RttBasedBackoffConfig, SafeResetOnRouteChange,
-    TrendlineEstimatorSettings,
+    LossBasedBweV2Config, ProbeControllerConfig, RobustThroughputEstimatorSettings,
+    RttBasedBackoffConfig, SafeResetOnRouteChange, TrendlineEstimatorSettings,
 };
 
 /// Current field trials for WebRTC that impact GoogCC.
@@ -46,9 +45,6 @@ pub struct FieldTrials {
 
     /// WebRTC-Bwe-SeparateAudioPackets
     pub separate_audio_packets: BweSeparateAudioPacketsSettings,
-
-    /// WebRTC-Bwe-LossBasedControl
-    pub loss_based_control: LossBasedControlConfig,
 
     /// LossBasedBweV2Config
     pub loss_based_bwe_v2: LossBasedBweV2Config,
@@ -106,7 +102,6 @@ impl Default for FieldTrials {
             video_rate_control: VideoRateControlConfig::default(),
             vp8_base_heavy_tl3_alloc: false,
             separate_audio_packets: BweSeparateAudioPacketsSettings::default(),
-            loss_based_control: LossBasedControlConfig::default(),
             loss_based_bwe_v2: LossBasedBweV2Config::default(),
             max_rtt_limit: RttBasedBackoffConfig::default(),
             trendline_estimator_settings: TrendlineEstimatorSettings::default(),

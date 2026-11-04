@@ -1670,17 +1670,7 @@ mod test {
 
     /*
     #[test]
-    fn LossBasedControlUpdatesTargetRateBasedOnLinkCapacity() {
-      ScopedFieldTrials trial("WebRTC-Bwe-LossBasedControl/Enabled/");
-      // TODO(srte): Should the behavior be unaffected at low loss rates?
-      UpdatesTargetRateBasedOnLinkCapacity("_loss_based");
-    }
-    */
-
-    /*
-    #[test]
     fn LossBasedControlDoesModestBackoffToHighLoss() {
-      ScopedFieldTrials trial("WebRTC-Bwe-LossBasedControl/Enabled/");
       let s = Scenario::new("googcc_unit/high_loss_channel", false);
       let mut config = CallClientConfig::default();
       config.transport.rates.min_rate = DataRate::KilobitsPerSec(10);
@@ -1697,7 +1687,6 @@ mod test {
     let client = CreateVideoSendingClient(&s, config, {send_net}, {ret_net});
 
       s.RunFor(TimeDelta::Seconds(120));
-      // Without LossBasedControl trial, bandwidth drops to ~10 kbps.
       EXPECT_GT(client.target_rate().kbps(), 100);
     }
     */
