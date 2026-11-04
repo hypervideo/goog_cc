@@ -273,12 +273,20 @@ impl GoogCcNetworkController {
                 std::cmp::max(self.min_data_rate, self.min_total_allocated_bitrate);
         }
         if self.max_data_rate < self.min_data_rate {
-            tracing::warn!("max bitrate smaller than min bitrate");
+            tracing::warn!(
+                "max bitrate {:?} smaller than min bitrate {:?}",
+                self.max_data_rate,
+                self.min_data_rate
+            );
             self.max_data_rate = self.min_data_rate;
         }
         match self.starting_rate {
             Some(starting_rate) if starting_rate < self.min_data_rate => {
-                tracing::warn!("start bitrate smaller than min bitrate");
+                tracing::warn!(
+                    "start bitrate {:?} smaller than min bitrate {:?}",
+                    starting_rate,
+                    self.min_data_rate
+                );
                 self.starting_rate = Some(self.min_data_rate);
             }
             _ => {}
