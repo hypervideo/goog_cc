@@ -345,12 +345,6 @@ impl SendSideBandwidthEstimation {
             }
         }
         self.update_min_history(at_time);
-        if self.last_loss_packet_report.is_infinite() {
-            // No feedback received.
-            // TODO(srte): This is likely redundant in most cases.
-            self.apply_target_limits(at_time);
-            return;
-        }
 
         if self.loss_based_bandwidth_estimator_v2_ready_for_use() {
             let result = self
@@ -358,6 +352,13 @@ impl SendSideBandwidthEstimation {
                 .get_loss_based_result();
             self.loss_based_state = result.state;
             self.update_target_bitrate(result.bandwidth_estimate, at_time);
+            return;
+        }
+
+        if self.last_loss_packet_report.is_infinite() {
+            // No feedback received.
+            // TODO(srte): This is likely redundant in most cases.
+            self.apply_target_limits(at_time);
             return;
         }
 
