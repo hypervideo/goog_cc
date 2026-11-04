@@ -210,10 +210,6 @@ impl DelayBasedBwe {
         self.rate_control.set_min_bitrate(min_bitrate);
     }
 
-    pub fn get_expected_bwe_period(&self) -> TimeDelta {
-        self.rate_control.get_expected_bandwidth_period()
-    }
-
     /* unused?
     pub fn trigger_overuse(
         &mut self,
@@ -1195,17 +1191,6 @@ mod test {
             TARGET_UTILIZATION_FRACTION * 4000000.0,
             epsilon = 10000.0
         );
-    }
-
-    #[test]
-    fn get_expected_bwe_period_ms() {
-        let mut bwe = DelayBasedBweTest::new();
-        let default_interval = bwe.bitrate_estimator.get_expected_bwe_period();
-        assert!(default_interval.ms() > 0);
-        bwe.capacity_drop_test_helper(1, true, 533, 0);
-        let interval = bwe.bitrate_estimator.get_expected_bwe_period();
-        assert!(interval.ms() > 0);
-        assert_ne!(interval.ms(), default_interval.ms());
     }
 
     #[test]

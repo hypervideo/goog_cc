@@ -216,7 +216,6 @@ impl GoogCcNetworkController {
                     at_time,
                     loss_rate_ratio: self.last_estimated_fraction_loss as f32 / 255.0,
                     round_trip_time: self.last_estimated_round_trip_time,
-                    bwe_period: self.delay_based_bwe.get_expected_bwe_period(),
                     ..Default::default()
                 },
                 at_time,
@@ -340,15 +339,12 @@ impl GoogCcNetworkController {
             self.alr_detector
                 .set_estimated_bitrate(loss_based_target_rate);
 
-            let bwe_period: TimeDelta = self.delay_based_bwe.get_expected_bwe_period();
-
             let mut target_rate_msg = TargetTransferRate {
                 at_time,
                 network_estimate: NetworkEstimate {
                     at_time,
                     round_trip_time,
                     loss_rate_ratio: fraction_loss as f32 / 255.0,
-                    bwe_period,
                     ..Default::default()
                 },
                 is_bandwidth_limited,

@@ -355,7 +355,6 @@ pub struct NetworkEstimate {
     /// Deprecated, use TargetTransferRate::target_rate instead.
     pub bandwidth: DataRate,
     pub round_trip_time: TimeDelta,
-    pub bwe_period: TimeDelta,
 
     pub loss_rate_ratio: f32,
 }
@@ -366,7 +365,6 @@ impl Default for NetworkEstimate {
             at_time: Timestamp::plus_infinity(),
             bandwidth: DataRate::infinity(),
             round_trip_time: TimeDelta::plus_infinity(),
-            bwe_period: TimeDelta::plus_infinity(),
             loss_rate_ratio: 0.0,
         }
     }
