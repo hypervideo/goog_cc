@@ -1125,11 +1125,11 @@ impl LossBasedBweV2 {
             return self.adjust_bias_factor(
                 self.average_reported_loss_ratio,
                 self.config.higher_bw_bias_factor,
-            ) * bandwidth.kbps_float()
+            ) * bandwidth.kbps() as f64
                 + self.adjust_bias_factor(
                     self.average_reported_loss_ratio,
                     self.config.higher_log_bw_bias_factor,
-                ) * (1.0 + bandwidth.kbps_float()).ln();
+                ) * (1.0 + bandwidth.kbps() as f64).ln();
         }
         0.0
     }
