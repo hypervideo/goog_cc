@@ -662,7 +662,12 @@ impl LossBasedBweV2 {
             self.newtons_method_update(&mut candidate);
 
             let candidate_objective: f64 = self.get_objective(&candidate);
-            if candidate_objective > objective_max {
+            if candidate_objective > objective_max
+                || (candidate_objective == objective_max
+                    && candidate.loss_limited_bandwidth > best_candidate.loss_limited_bandwidth)
+            {
+                // Select the candidate with the highest objective or the one with the
+                // same objective but higher bandwidth if they are tied.
                 objective_max = candidate_objective;
                 best_candidate = candidate;
             }
@@ -3701,6 +3706,43 @@ mod test {
                 .get_loss_based_result()
                 .bandwidth_estimate,
             START_BITRATE
+        );
+    }
+
+    #[test]
+    fn select_higher_candidate_if_having_same_objective() {
+        let mut test = LossBasedBweV2Test::default();
+        let config = short_observation_config();
+        let mut loss_based_bandwidth_estimator = LossBasedBweV2::new(config);
+        const START_BITRATE: DataRate = DataRate::from_kilobits_per_sec(1000);
+        loss_based_bandwidth_estimator.set_bandwidth_estimate(START_BITRATE);
+        let enough_feedback_01: Vec<PacketResult> = test
+            .create_packet_results_with_received_packets(
+                /*first_packet_timestamp=*/ Timestamp::zero(),
+            );
+        let enough_feedback_02: Vec<PacketResult> = test
+            .create_packet_results_with_received_packets(
+                /*first_packet_timestamp=*/
+                Timestamp::zero() + OBSERVATION_DURATION_LOWER_BOUND,
+            );
+        loss_based_bandwidth_estimator.update_bandwidth_estimate(
+            &enough_feedback_01,
+            START_BITRATE,
+            /*in_alr=*/ false,
+        );
+        let delay_based_estimate: DataRate =
+            DataRate::from_bytes_per_sec_float(START_BITRATE.bytes_per_sec() as f64 * 1.02 + 1.0);
+        loss_based_bandwidth_estimator.update_bandwidth_estimate(
+            &enough_feedback_02,
+            delay_based_estimate,
+            /*in_alr=*/ false,
+        );
+
+        assert_eq!(
+            loss_based_bandwidth_estimator
+                .get_loss_based_result()
+                .bandwidth_estimate,
+            delay_based_estimate
         );
     }
 } // namespace
