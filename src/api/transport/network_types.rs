@@ -462,6 +462,10 @@ pub struct TargetTransferRate {
     pub network_estimate: NetworkEstimate,
     pub target_rate: DataRate,
     pub cwnd_reduce_ratio: f64,
+
+    /// True if WebRTC is actively sending near estimated link capacity (not in
+    /// ALR).
+    pub is_bandwidth_limited: bool,
 }
 
 impl Default for TargetTransferRate {
@@ -471,6 +475,7 @@ impl Default for TargetTransferRate {
             network_estimate: NetworkEstimate::default(),
             target_rate: DataRate::zero(),
             cwnd_reduce_ratio: 0.0,
+            is_bandwidth_limited: true,
         }
     }
 }

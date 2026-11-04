@@ -110,6 +110,7 @@ pub struct GoogCcNetworkController {
     max_padding_rate: DataRate,
 
     previously_in_alr: bool,
+    last_is_bandwidth_limited: bool,
 
     current_data_window: Option<DataSize>,
 }
@@ -186,6 +187,7 @@ impl GoogCcNetworkController {
                 .max_padding_rate
                 .unwrap_or(DataRate::zero()),
             previously_in_alr: false,
+            last_is_bandwidth_limited: true,
             current_data_window: None,
 
             initial_config: Some(config),
@@ -219,6 +221,10 @@ impl GoogCcNetworkController {
                 },
                 at_time,
                 target_rate: self.last_pushback_target_rate,
+                is_bandwidth_limited: self
+                    .alr_detector
+                    .get_application_limited_region_start_time()
+                    .is_none(),
                 ..Default::default()
             }),
             pacer_config: Some(self.get_pacing_rates(at_time)),
@@ -312,17 +318,24 @@ impl GoogCcNetworkController {
             }
         }
 
+        let is_bandwidth_limited: bool = self
+            .alr_detector
+            .get_application_limited_region_start_time()
+            .is_none();
+
         if (loss_based_target_rate != self.last_loss_based_target_rate)
             || (loss_based_state != self.last_loss_base_state)
             || (fraction_loss != self.last_estimated_fraction_loss)
             || (round_trip_time != self.last_estimated_round_trip_time)
             || (pushback_target_rate != self.last_pushback_target_rate)
+            || (is_bandwidth_limited != self.last_is_bandwidth_limited)
         {
             self.last_loss_based_target_rate = loss_based_target_rate;
             self.last_pushback_target_rate = pushback_target_rate;
             self.last_estimated_fraction_loss = fraction_loss;
             self.last_estimated_round_trip_time = round_trip_time;
             self.last_loss_base_state = loss_based_state;
+            self.last_is_bandwidth_limited = is_bandwidth_limited;
 
             self.alr_detector
                 .set_estimated_bitrate(loss_based_target_rate);
@@ -338,6 +351,7 @@ impl GoogCcNetworkController {
                     bwe_period,
                     ..Default::default()
                 },
+                is_bandwidth_limited,
                 ..Default::default()
             };
 
@@ -2022,4 +2036,91 @@ mod test {
       EXPECT_LE(client.target_rate().kbps(), 300);
     }
     */
+
+    #[test]
+    fn triggers_target_rate_update_when_bandwidth_limited_changes() {
+        let mut controller = create_controller(FieldTrials::default());
+        let mut current_time = Timestamp::from_millis(123456);
+
+        controller.on_network_availability(NetworkAvailability {
+            at_time: current_time,
+            network_available: true,
+        });
+        let update = controller.on_process_interval(ProcessInterval {
+            at_time: current_time,
+            ..Default::default()
+        });
+        assert!(update.target_rate.unwrap().is_bandwidth_limited);
+
+        // Send packet to initialize ALR detector
+        let mut sent_packet = SentPacket {
+            send_time: current_time,
+            size: DataSize::from_bytes(1000),
+            ..Default::default()
+        };
+        controller.on_sent_packet(sent_packet);
+
+        // Wait 10 seconds without sending any packets (this will make budget ratio
+        // accumulate and enter ALR)
+        current_time += TimeDelta::from_seconds(10);
+        // Send a tiny packet to trigger AlrDetector state change evaluation
+        sent_packet.send_time = current_time;
+        sent_packet.size = DataSize::from_bytes(1);
+        let update = controller.on_sent_packet(sent_packet);
+
+        let mut alr_detected = false;
+        if update
+            .target_rate
+            .is_some_and(|target_rate| !target_rate.is_bandwidth_limited)
+        {
+            alr_detected = true;
+        } else {
+            // Process interval should trigger target rate update if not already
+            // triggered by OnSentPacket
+            let update = controller.on_process_interval(ProcessInterval {
+                at_time: current_time,
+                ..Default::default()
+            });
+            if update
+                .target_rate
+                .is_some_and(|target_rate| !target_rate.is_bandwidth_limited)
+            {
+                alr_detected = true;
+            }
+        }
+        assert!(alr_detected);
+
+        // Now send a large burst of packets to leave ALR.
+        // Target rate is INITIAL_BITRATE (60kbps). Budget ratio needs to drop below
+        // 0.5. We send 50 packets of 1000 bytes.
+        let mut bandwidth_limited_detected = false;
+        for _ in 0..50 {
+            current_time += TimeDelta::from_millis(1);
+            sent_packet.send_time = current_time;
+            sent_packet.size = DataSize::from_bytes(1000);
+            let update = controller.on_sent_packet(sent_packet);
+            if update
+                .target_rate
+                .is_some_and(|target_rate| target_rate.is_bandwidth_limited)
+            {
+                bandwidth_limited_detected = true;
+            }
+        }
+
+        if !bandwidth_limited_detected {
+            // Process interval should trigger target rate update if not already
+            // triggered by OnSentPacket
+            let update = controller.on_process_interval(ProcessInterval {
+                at_time: current_time,
+                ..Default::default()
+            });
+            if update
+                .target_rate
+                .is_some_and(|target_rate| target_rate.is_bandwidth_limited)
+            {
+                bandwidth_limited_detected = true;
+            }
+        }
+        assert!(bandwidth_limited_detected);
+    }
 }
