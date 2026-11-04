@@ -294,6 +294,12 @@ mod test {
     }
 
     #[test]
+    fn can_be_negative() {
+        assert_eq!(Timestamp::from_micros(-1).us(), -1);
+        assert_eq!(format!("{:?}", Timestamp::from_millis(-100)), "-100 ms");
+    }
+
+    #[test]
     fn converts_to_and_from_double() {
         const MICROS: i64 = 17017;
         const MICROS_DOUBLE: f64 = MICROS as f64;
