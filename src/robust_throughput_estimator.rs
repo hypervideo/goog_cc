@@ -732,10 +732,11 @@ mod test {
         let mut in_order_estimator = RobustThroughputEstimator::default();
         in_order_estimator.incoming_packet_feedback(&packets);
 
-        // Feedback arrives one packet at a time, and packets 10 to 14 arrive
-        // after packet 30.
+        // Feedback arrives one packet at a time, and packets 0 to 4 arrive
+        // after packet 30. Packet 0 moves to the front of the window, and
+        // packets 1 to 4 stop behind the packet before them.
         let mut reordered_estimator = RobustThroughputEstimator::default();
-        for i in (0..10).chain(15..31).chain(10..15).chain(31..40) {
+        for i in (5..31).chain(0..5).chain(31..40) {
             reordered_estimator.incoming_packet_feedback(&packets[i..=i]);
         }
 
