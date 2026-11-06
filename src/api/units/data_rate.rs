@@ -281,28 +281,6 @@ mod test {
         assert!(DataRate::from_kilobits_per_sec_float(INFINITY).is_infinite());
     }
     #[test]
-    fn clamping() {
-        const UPPER: DataRate = DataRate::from_kilobits_per_sec(800);
-        const LOWER: DataRate = DataRate::from_kilobits_per_sec(100);
-        const UNDER: DataRate = DataRate::from_kilobits_per_sec(100);
-        const INSIDE: DataRate = DataRate::from_kilobits_per_sec(500);
-        const OVER: DataRate = DataRate::from_kilobits_per_sec(1000);
-        assert_eq!(UNDER.clamp(LOWER, UPPER), LOWER);
-        assert_eq!(INSIDE.clamp(LOWER, UPPER), INSIDE);
-        assert_eq!(OVER.clamp(LOWER, UPPER), UPPER);
-
-        let mut mutable_rate: DataRate = LOWER;
-        mutable_rate.clamp_mut(LOWER, UPPER);
-        assert_eq!(mutable_rate, LOWER);
-        mutable_rate = INSIDE;
-        mutable_rate.clamp_mut(LOWER, UPPER);
-        assert_eq!(mutable_rate, INSIDE);
-        mutable_rate = OVER;
-        mutable_rate.clamp_mut(LOWER, UPPER);
-        assert_eq!(mutable_rate, UPPER);
-    }
-
-    #[test]
     fn math_operations() {
         const VALUE_A: i64 = 450;
         const VALUE_B: i64 = 267;

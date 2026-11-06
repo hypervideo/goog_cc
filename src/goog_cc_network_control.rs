@@ -56,7 +56,6 @@ impl Default for SafeResetOnRouteChange {
 pub struct GoogCcConfig {
     // network_state_estimator: Box<dyn NetworkStateEstimator>,
     // network_state_predictor: Box<dyn NetworkStatePredictor>,
-    pub feedback_only: bool,
 }
 
 /// Google Congestion Control.
@@ -67,14 +66,12 @@ pub struct GoogCcConfig {
 pub struct GoogCcNetworkController {
     field_trials: FieldTrials,
 
-    packet_feedback_only: bool,
     safe_reset_on_route_change: bool,
     safe_reset_acknowledged_rate: bool,
     use_min_allocatable_as_lower_bound: bool,
     ignore_probes_lower_than_network_estimate: bool,
     limit_probes_lower_than_throughput_estimate: bool,
     rate_control_settings: RateControlSettings,
-    pace_at_max_of_bwe_and_lower_link_capacity: bool,
     limit_pacingfactor_by_upper_link_capacity_estimate: bool,
 
     probe_controller: ProbeController,
@@ -94,42 +91,40 @@ pub struct GoogCcNetworkController {
     starting_rate: Option<DataRate>,
 
     first_packet_sent: bool,
+    first_transport_feedback_received: bool,
 
     estimate: Option<NetworkStateEstimate>,
-
-    next_loss_update: Timestamp, // = Timestamp::minus_infinity();
-    lost_packets_since_last_loss_update: i64,
-    expected_packets_since_last_loss_update: i64,
 
     feedback_max_rtts: VecDeque<i64>,
 
     last_loss_based_target_rate: DataRate,
     last_pushback_target_rate: DataRate,
-    last_stable_target_rate: DataRate,
     last_loss_base_state: LossBasedState,
 
     last_estimated_fraction_loss: u8,
     last_estimated_round_trip_time: TimeDelta, //= TimeDelta::plus_infinity();
 
-    pacing_factor: f64,
+    pacing_factor: Option<f64>,
+    pacing_time_window: TimeDelta,
     min_total_allocated_bitrate: DataRate,
     max_padding_rate: DataRate,
 
     previously_in_alr: bool,
+    last_is_bandwidth_limited: bool,
 
     current_data_window: Option<DataSize>,
 }
 
 impl GoogCcNetworkController {
-    // From RTCPSender video report interval.
-    const LOSS_UPDATE_INTERVAL: TimeDelta = TimeDelta::from_millis(1000);
-
     // Pacing-rate relative to our target send rate.
     // Multiplicative factor that is applied to the target bitrate to calculate
     // the number of bytes that can be transmitted per interval.
     // Increasing this factor will result in lower delays in cases of bitrate
     // overshoots from the encoder.
-    const DEFAULT_PACE_MULTIPLIER: f64 = 2.5;
+    const DEFAULT_PACE_MULTIPLIER: f32 = 2.5;
+    // If send side bandwidth estimation is used, this pacing multiplier is used per
+    // default.
+    const DEFAULT_PACE_MULTIPLIER_WITH_SEND_SIDE_BWE: f32 = 1.1;
 
     // If the probe result is far below the current throughput estimate
     // it's unlikely that the probe is accurate, so we don't want to drop too far.
@@ -137,7 +132,7 @@ impl GoogCcNetworkController {
     // below the current throughput estimate to drain the network queues.
     const PROBE_DROP_THROUGHPUT_FRACTION: f64 = 0.85;
 
-    pub fn new(config: NetworkControllerConfig, goog_cc_config: GoogCcConfig) -> Self {
+    pub fn new(config: NetworkControllerConfig, _goog_cc_config: GoogCcConfig) -> Self {
         let field_trials = config.field_trials.clone();
         let rate_control_settings = RateControlSettings::new(&field_trials);
 
@@ -146,7 +141,6 @@ impl GoogCcNetworkController {
         delay_based_bwe.set_min_bitrate(CONGESTION_CONTROLLER_MIN_BITRATE);
 
         Self {
-            packet_feedback_only: goog_cc_config.feedback_only,
             safe_reset_on_route_change: field_trials.safe_reset_on_route_change.enabled,
             safe_reset_acknowledged_rate: field_trials.safe_reset_on_route_change.ack,
             use_min_allocatable_as_lower_bound: field_trials.min_alloc_as_lower_bound,
@@ -154,8 +148,6 @@ impl GoogCcNetworkController {
                 .ignore_probes_lower_than_network_state_estimate,
             limit_probes_lower_than_throughput_estimate: field_trials
                 .limit_probes_lower_than_throughput_estimate,
-            pace_at_max_of_bwe_and_lower_link_capacity: field_trials
-                .pace_at_max_of_bwe_and_lower_link_capacity,
             limit_pacingfactor_by_upper_link_capacity_estimate: field_trials
                 .limit_pacing_factor_by_upper_link_capacity_estimate,
 
@@ -175,21 +167,16 @@ impl GoogCcNetworkController {
             max_data_rate: DataRate::plus_infinity(),
             starting_rate: config.constraints.starting_rate,
             first_packet_sent: false,
+            first_transport_feedback_received: false,
             estimate: None,
-            next_loss_update: Timestamp::minus_infinity(),
-            lost_packets_since_last_loss_update: 0,
-            expected_packets_since_last_loss_update: 0,
             feedback_max_rtts: VecDeque::new(),
             last_loss_based_target_rate: config.constraints.starting_rate.unwrap(),
             last_pushback_target_rate: config.constraints.starting_rate.unwrap(),
-            last_stable_target_rate: config.constraints.starting_rate.unwrap(),
             last_loss_base_state: LossBasedState::DelayBasedEstimate,
             last_estimated_fraction_loss: 0,
             last_estimated_round_trip_time: TimeDelta::plus_infinity(),
-            pacing_factor: config
-                .stream_based_config
-                .pacing_factor
-                .unwrap_or(Self::DEFAULT_PACE_MULTIPLIER),
+            pacing_factor: config.stream_based_config.pacing_factor,
+            pacing_time_window: config.default_pacing_time_window,
             min_total_allocated_bitrate: config
                 .stream_based_config
                 .min_total_allocated_bitrate
@@ -200,6 +187,7 @@ impl GoogCcNetworkController {
                 .max_padding_rate
                 .unwrap_or(DataRate::zero()),
             previously_in_alr: false,
+            last_is_bandwidth_limited: true,
             current_data_window: None,
 
             initial_config: Some(config),
@@ -217,9 +205,7 @@ impl GoogCcNetworkController {
     /// goog_cc's own per-cluster probe observations, as computed by the internal
     /// [`ProbeBitrateEstimator`] while processing transport feedback. Exposed
     /// read-only for observability; reading it does not affect the estimate.
-    pub fn probe_cluster_observations(
-        &self,
-    ) -> impl Iterator<Item = &ProbeClusterObservation> {
+    pub fn probe_cluster_observations(&self) -> impl Iterator<Item = &ProbeClusterObservation> {
         self.probe_bitrate_estimator.probe_cluster_observations()
     }
 
@@ -230,12 +216,14 @@ impl GoogCcNetworkController {
                     at_time,
                     loss_rate_ratio: self.last_estimated_fraction_loss as f32 / 255.0,
                     round_trip_time: self.last_estimated_round_trip_time,
-                    bwe_period: self.delay_based_bwe.get_expected_bwe_period(),
                     ..Default::default()
                 },
                 at_time,
                 target_rate: self.last_pushback_target_rate,
-                stable_target_rate: self.bandwidth_estimation.get_estimated_link_capacity(),
+                is_bandwidth_limited: self
+                    .alr_detector
+                    .get_application_limited_region_start_time()
+                    .is_none(),
                 ..Default::default()
             }),
             pacer_config: Some(self.get_pacing_rates(at_time)),
@@ -285,12 +273,20 @@ impl GoogCcNetworkController {
                 std::cmp::max(self.min_data_rate, self.min_total_allocated_bitrate);
         }
         if self.max_data_rate < self.min_data_rate {
-            tracing::warn!("max bitrate smaller than min bitrate");
+            tracing::warn!(
+                "max bitrate {:?} smaller than min bitrate {:?}",
+                self.max_data_rate,
+                self.min_data_rate
+            );
             self.max_data_rate = self.min_data_rate;
         }
         match self.starting_rate {
             Some(starting_rate) if starting_rate < self.min_data_rate => {
-                tracing::warn!("start bitrate smaller than min bitrate");
+                tracing::warn!(
+                    "start bitrate {:?} smaller than min bitrate {:?}",
+                    starting_rate,
+                    self.min_data_rate
+                );
                 self.starting_rate = Some(self.min_data_rate);
             }
             _ => {}
@@ -328,39 +324,38 @@ impl GoogCcNetworkController {
                     / loss_based_target_rate.bps_float();
             }
         }
-        let mut stable_target_rate: DataRate =
-            self.bandwidth_estimation.get_estimated_link_capacity();
-        stable_target_rate = std::cmp::min(stable_target_rate, pushback_target_rate);
+
+        let is_bandwidth_limited: bool = self
+            .alr_detector
+            .get_application_limited_region_start_time()
+            .is_none();
 
         if (loss_based_target_rate != self.last_loss_based_target_rate)
             || (loss_based_state != self.last_loss_base_state)
             || (fraction_loss != self.last_estimated_fraction_loss)
             || (round_trip_time != self.last_estimated_round_trip_time)
             || (pushback_target_rate != self.last_pushback_target_rate)
-            || (stable_target_rate != self.last_stable_target_rate)
+            || (is_bandwidth_limited != self.last_is_bandwidth_limited)
         {
             self.last_loss_based_target_rate = loss_based_target_rate;
             self.last_pushback_target_rate = pushback_target_rate;
             self.last_estimated_fraction_loss = fraction_loss;
             self.last_estimated_round_trip_time = round_trip_time;
-            self.last_stable_target_rate = stable_target_rate;
             self.last_loss_base_state = loss_based_state;
+            self.last_is_bandwidth_limited = is_bandwidth_limited;
 
             self.alr_detector
-                .set_estimated_bitrate(loss_based_target_rate.bps());
-
-            let bwe_period: TimeDelta = self.delay_based_bwe.get_expected_bwe_period();
+                .set_estimated_bitrate(loss_based_target_rate);
 
             let mut target_rate_msg = TargetTransferRate {
                 at_time,
-                stable_target_rate,
                 network_estimate: NetworkEstimate {
                     at_time,
                     round_trip_time,
                     loss_rate_ratio: fraction_loss as f32 / 255.0,
-                    bwe_period,
                     ..Default::default()
                 },
+                is_bandwidth_limited,
                 ..Default::default()
             };
 
@@ -399,27 +394,16 @@ impl GoogCcNetworkController {
     fn get_pacing_rates(&self, at_time: Timestamp) -> PacerConfig {
         // Pacing rate is based on target rate before congestion window pushback,
         // because we don't want to build queues in the pacer when pushback occurs.
-        let mut pacing_rate = match self.estimate {
-            Some(estimate)
-                if self.pace_at_max_of_bwe_and_lower_link_capacity
-                    && !self.bandwidth_estimation.pace_at_loss_based_estimate() =>
-            {
-                *[
-                    self.min_total_allocated_bitrate,
-                    estimate.link_capacity_lower,
-                    self.last_loss_based_target_rate,
-                ]
-                .iter()
-                .max()
-                .unwrap()
-                    * self.pacing_factor
-            }
-            _ => {
-                self.min_total_allocated_bitrate
-                    .max(self.last_loss_based_target_rate)
-                    * self.pacing_factor
-            }
-        };
+        let mut pacing_rate = self
+            .min_total_allocated_bitrate
+            .max(self.last_loss_based_target_rate)
+            * self
+                .pacing_factor
+                .unwrap_or(if self.first_transport_feedback_received {
+                    Self::DEFAULT_PACE_MULTIPLIER_WITH_SEND_SIDE_BWE as f64
+                } else {
+                    Self::DEFAULT_PACE_MULTIPLIER as f64
+                });
 
         match self.estimate {
             Some(estimate)
@@ -446,12 +430,7 @@ impl GoogCcNetworkController {
                 self.max_padding_rate
             };
         padding_rate = std::cmp::min(padding_rate, self.last_pushback_target_rate);
-        let mut msg = PacerConfig::default();
-        msg.at_time = at_time;
-        msg.time_window = TimeDelta::from_seconds(1);
-        msg.data_window = pacing_rate * msg.time_window;
-        msg.pad_window = padding_rate * msg.time_window;
-        msg
+        PacerConfig::create(at_time, pacing_rate, padding_rate, self.pacing_time_window)
     }
 
     fn set_network_state_estimate(&mut self, estimate: Option<NetworkStateEstimate>) {
@@ -540,13 +519,11 @@ impl NetworkControllerInterface for GoogCcNetworkController {
                 self.probe_controller
                     .enable_periodic_alr_probing(requests_alr_probing);
             }
-            if let Some(enable_repeated_initial_probing) = initial_config
-                .stream_based_config
-                .enable_repeated_initial_probing
-            {
-                self.probe_controller
-                    .enable_repeated_initial_probing(enable_repeated_initial_probing);
-            }
+            self.probe_controller.enable_repeated_initial_probing(
+                initial_config
+                    .stream_based_config
+                    .enable_repeated_initial_probing,
+            );
             let total_bitrate: Option<DataRate> = initial_config
                 .stream_based_config
                 .max_total_allocated_bitrate;
@@ -565,10 +542,15 @@ impl NetworkControllerInterface for GoogCcNetworkController {
             congestion_window_pushback_controller.update_pacing_queue(pacer_queue.bytes())
         };
         self.bandwidth_estimation.update_estimate(msg.at_time);
-        let start_time_ms: Option<i64> = self
-            .alr_detector
-            .get_application_limited_region_start_time();
-        self.probe_controller.set_alr_start_time_ms(start_time_ms);
+        // Avoid ALR probing before the first transport feedback is received in
+        // order to avoid ALR probing if receive side BWE is used.
+        self.probe_controller
+            .set_alr_start_time(if self.first_transport_feedback_received {
+                self.alr_detector
+                    .get_application_limited_region_start_time()
+            } else {
+                None
+            });
 
         let mut probes = self.probe_controller.process(msg.at_time);
         update.probe_cluster_configs.append(&mut probes);
@@ -603,17 +585,13 @@ impl NetworkControllerInterface for GoogCcNetworkController {
     }
 
     fn on_remote_bitrate_report(&mut self, msg: RemoteBitrateReport) -> NetworkControlUpdate {
-        if self.packet_feedback_only {
-            tracing::error!("Received REMB for packet feedback only GoogCC");
-            return NetworkControlUpdate::default();
-        }
         self.bandwidth_estimation
             .update_receiver_estimate(msg.receive_time, msg.bandwidth);
         NetworkControlUpdate::default()
     }
 
     fn on_round_trip_time_update(&mut self, msg: RoundTripTimeUpdate) -> NetworkControlUpdate {
-        if self.packet_feedback_only || msg.smoothed {
+        if msg.smoothed {
             return NetworkControlUpdate::default();
         }
         debug_assert!(!msg.round_trip_time.is_zero());
@@ -628,7 +606,7 @@ impl NetworkControllerInterface for GoogCcNetworkController {
 
     fn on_sent_packet(&mut self, sent_packet: SentPacket) -> NetworkControlUpdate {
         self.alr_detector
-            .on_bytes_sent(sent_packet.size.bytes() as _, sent_packet.send_time.ms());
+            .on_bytes_sent(sent_packet.size, sent_packet.send_time);
         self.acknowledged_bitrate_estimator.set_alr(
             self.alr_detector
                 .get_application_limited_region_start_time()
@@ -675,8 +653,8 @@ impl NetworkControllerInterface for GoogCcNetworkController {
 
         let mut pacing_changed: bool = false;
         match msg.pacing_factor {
-            Some(pacing_factor) if pacing_factor != self.pacing_factor => {
-                self.pacing_factor = pacing_factor;
+            Some(pacing_factor) if Some(pacing_factor) != self.pacing_factor => {
+                self.pacing_factor = Some(pacing_factor);
                 pacing_changed = true;
             }
             _ => {}
@@ -725,9 +703,6 @@ impl NetworkControllerInterface for GoogCcNetworkController {
     }
 
     fn on_transport_loss_report(&mut self, msg: TransportLossReport) -> NetworkControlUpdate {
-        if self.packet_feedback_only {
-            return NetworkControlUpdate::default();
-        }
         let total_packets_delta: i64 =
             msg.packets_received_delta as i64 + msg.packets_lost_delta as i64;
         self.bandwidth_estimation.update_packets_lost(
@@ -746,6 +721,10 @@ impl NetworkControllerInterface for GoogCcNetworkController {
             // TODO(bugs.webrtc.org/10125): Design a better mechanism to safe-guard
             // against building very large network queues.
             return NetworkControlUpdate::default();
+        }
+        if !self.first_transport_feedback_received {
+            // Send side BWE is used.
+            self.first_transport_feedback_received = true;
         }
 
         if let Some(congestion_window_pushback_controller) =
@@ -780,54 +759,14 @@ impl NetworkControllerInterface for GoogCcNetworkController {
             self.bandwidth_estimation
                 .update_propagation_rtt(report.feedback_time, min_propagation_rtt);
         }
-        if self.packet_feedback_only {
-            if !self.feedback_max_rtts.is_empty() {
-                let sum_rtt_ms: i64 = self.feedback_max_rtts.iter().sum();
-                let mean_rtt_ms: i64 = sum_rtt_ms / self.feedback_max_rtts.len() as i64;
-                self.delay_based_bwe
-                    .on_rtt_update(TimeDelta::from_millis(mean_rtt_ms));
-            }
-
-            let mut feedback_min_rtt: TimeDelta = TimeDelta::plus_infinity();
-            for packet_feedback in report.received_with_send_info() {
-                let pending_time: TimeDelta = max_recv_time - packet_feedback.receive_time;
-                let rtt: TimeDelta =
-                    report.feedback_time - packet_feedback.sent_packet.send_time - pending_time;
-                // Value used for predicting NACK round trip time in FEC controller.
-                feedback_min_rtt = std::cmp::min(rtt, feedback_min_rtt);
-            }
-            if feedback_min_rtt.is_finite() {
-                self.bandwidth_estimation
-                    .update_rtt(feedback_min_rtt, report.feedback_time);
-            }
-
-            self.expected_packets_since_last_loss_update +=
-                report.packets_with_feedback().len() as i64;
-            for packet_feedback in report.packets_with_feedback() {
-                if !packet_feedback.is_received() {
-                    self.lost_packets_since_last_loss_update += 1;
-                }
-            }
-            if report.feedback_time > self.next_loss_update {
-                self.next_loss_update = report.feedback_time + Self::LOSS_UPDATE_INTERVAL;
-                self.bandwidth_estimation.update_packets_lost(
-                    self.lost_packets_since_last_loss_update,
-                    self.expected_packets_since_last_loss_update,
-                    report.feedback_time,
-                );
-                self.expected_packets_since_last_loss_update = 0;
-                self.lost_packets_since_last_loss_update = 0;
-            }
-        }
-        let alr_start_time: Option<i64> = self
+        let alr_start_time: Option<Timestamp> = self
             .alr_detector
             .get_application_limited_region_start_time();
-
         if self.previously_in_alr && alr_start_time.is_none() {
-            let now_ms: i64 = report.feedback_time.ms();
             self.acknowledged_bitrate_estimator
                 .set_alr_ended_time(report.feedback_time);
-            self.probe_controller.set_alr_ended_time_ms(now_ms);
+            self.probe_controller
+                .set_alr_ended_time(report.feedback_time);
         }
         self.previously_in_alr = alr_start_time.is_some();
         self.acknowledged_bitrate_estimator
@@ -909,7 +848,7 @@ impl NetworkControllerInterface for GoogCcNetworkController {
         let recovered_from_overuse = result.recovered_from_overuse;
 
         if recovered_from_overuse {
-            self.probe_controller.set_alr_start_time_ms(alr_start_time);
+            self.probe_controller.set_alr_start_time(alr_start_time);
             let mut probes = self.probe_controller.request_probe(report.feedback_time);
             update.probe_cluster_configs.append(&mut probes);
         }
@@ -974,7 +913,6 @@ fn get_bandwidth_limited_cause(
 
 #[cfg(test)]
 mod test {
-    use approx::assert_relative_eq;
     use test_trace::test;
 
     use crate::api::transport::PacketResult;
@@ -1009,6 +947,7 @@ mod test {
     const INITIAL_BITRATE_KBPS: i64 = 60;
     const INITIAL_BITRATE: DataRate = DataRate::from_kilobits_per_sec(INITIAL_BITRATE_KBPS);
     const DEFAULT_PACING_RATE: f64 = 2.5;
+    const DEFAULT_PACING_RATE_SEND_SIDE_BWE: f32 = 1.1;
 
     /*
     fn CreateVideoSendingClient(
@@ -1106,35 +1045,11 @@ mod test {
         target_bitrate
     }
 
-    // Create transport packets feedback with a built-up delay.
-    fn create_transport_packets_feedback(
-        per_packet_network_delay: TimeDelta,
-        one_way_delay: TimeDelta,
-        send_time: Timestamp,
-    ) -> TransportPacketsFeedback {
-        let mut delay_buildup: TimeDelta = one_way_delay;
-        const FEEDBACK_SIZE: i64 = 3;
-        const PAYLOAD_SIZE: usize = 1000;
-        let mut feedback = TransportPacketsFeedback::default();
-        for _ in 0..FEEDBACK_SIZE {
-            let packet: PacketResult = create_packet_result(
-                /*arrival_time=*/ send_time + delay_buildup,
-                send_time,
-                PAYLOAD_SIZE,
-                PacedPacketInfo::default(),
-            );
-            delay_buildup += per_packet_network_delay;
-            feedback.feedback_time = packet.receive_time + one_way_delay;
-            feedback.packet_feedbacks.push(packet);
-        }
-        feedback
-    }
-
     // Scenarios:
 
     /*
     fn UpdatesTargetRateBasedOnLinkCapacity(test_name: &str) {
-    let factory = CreateFeedbackOnlyFactory();
+    let factory = GoogCcNetworkControllerFactory::default();
       let s = Scenario::new("googcc_unit/target_capacity" + std::string(test_name), false);
       let mut config: CallClientConfig::default();
       config.transport.cc_factory = &factory;
@@ -1212,10 +1127,7 @@ mod test {
     }
     */
 
-    fn create_controller(
-        field_trials: FieldTrials,
-        feedback_only: bool,
-    ) -> GoogCcNetworkController {
+    fn create_controller(field_trials: FieldTrials) -> GoogCcNetworkController {
         let config = NetworkControllerConfig {
             field_trials,
             constraints: TargetRateConstraints {
@@ -1227,14 +1139,14 @@ mod test {
             ..Default::default()
         };
 
-        let goog_cc_config = GoogCcConfig { feedback_only };
+        let goog_cc_config = GoogCcConfig::default();
 
         GoogCcNetworkController::new(config, goog_cc_config)
     }
 
     #[test]
     fn initialize_target_rate_on_first_process_interval_after_network_available() {
-        let mut controller = create_controller(FieldTrials::default(), false);
+        let mut controller = create_controller(FieldTrials::default());
 
         let _ = controller.on_network_availability(NetworkAvailability {
             at_time: Timestamp::from_millis(123456),
@@ -1261,8 +1173,96 @@ mod test {
     }
 
     #[test]
-    fn reacts_to_changed_network_conditions() {
-        let mut controller = create_controller(FieldTrials::default(), false);
+    fn change_default_pacing_factor_after_first_feedback() {
+        let mut controller = create_controller(FieldTrials::default());
+
+        controller.on_network_availability(NetworkAvailability {
+            at_time: Timestamp::from_millis(123456),
+            network_available: true,
+        });
+        let update = controller.on_process_interval(ProcessInterval {
+            at_time: Timestamp::from_millis(123456),
+            ..Default::default()
+        });
+        assert_eq!(
+            update.pacer_config.unwrap().data_rate(),
+            INITIAL_BITRATE * DEFAULT_PACING_RATE
+        );
+
+        let mut feedback = TransportPacketsFeedback {
+            feedback_time: Timestamp::from_millis(123457),
+            ..Default::default()
+        };
+        feedback.packet_feedbacks.push(create_packet_result(
+            feedback.feedback_time,
+            feedback.feedback_time,
+            100,
+            PacedPacketInfo::default(),
+        ));
+        let update = controller.on_transport_packets_feedback(feedback);
+        let pacer_config = update.pacer_config.unwrap();
+        assert!(pacer_config.data_rate() >= INITIAL_BITRATE * DEFAULT_PACING_RATE_SEND_SIDE_BWE);
+        assert!(
+            pacer_config.data_rate()
+                < (INITIAL_BITRATE + DataRate::from_kilobits_per_sec(5))
+                    * DEFAULT_PACING_RATE_SEND_SIDE_BWE
+        );
+    }
+
+    #[test]
+    fn respects_configured_pacing_factor() {
+        let mut controller = create_controller(FieldTrials::default());
+
+        controller.on_network_availability(NetworkAvailability {
+            at_time: Timestamp::from_millis(123456),
+            network_available: true,
+        });
+        let update = controller.on_process_interval(ProcessInterval {
+            at_time: Timestamp::from_millis(123456),
+            ..Default::default()
+        });
+        assert_eq!(
+            update.pacer_config.unwrap().data_rate(),
+            INITIAL_BITRATE * DEFAULT_PACING_RATE
+        );
+
+        let mut last_pacer_config: Option<PacerConfig> = None;
+        let streams_config = StreamsConfig {
+            pacing_factor: Some(10.0),
+            ..Default::default()
+        };
+
+        let update = controller.on_streams_config(streams_config);
+        if update.pacer_config.is_some() {
+            last_pacer_config = update.pacer_config;
+        }
+
+        let mut feedback = TransportPacketsFeedback {
+            feedback_time: Timestamp::from_millis(123457),
+            ..Default::default()
+        };
+        feedback.packet_feedbacks.push(create_packet_result(
+            feedback.feedback_time,
+            feedback.feedback_time,
+            100,
+            PacedPacketInfo::default(),
+        ));
+        let update = controller.on_transport_packets_feedback(feedback);
+        if update.pacer_config.is_some() {
+            last_pacer_config = update.pacer_config;
+        }
+
+        let last_pacer_config = last_pacer_config.unwrap();
+        assert!(last_pacer_config.data_rate() >= INITIAL_BITRATE * 10);
+        assert!(
+            last_pacer_config.data_rate()
+                < (INITIAL_BITRATE + DataRate::from_kilobits_per_sec(5)) * 10
+        );
+    }
+
+    #[test]
+    fn reacts_to_changed_network_conditions_from_remote() {
+        let mut controller = create_controller(FieldTrials::default());
         let mut current_time: Timestamp = Timestamp::from_millis(123);
         controller.on_network_availability(NetworkAvailability {
             at_time: current_time,
@@ -1306,7 +1306,7 @@ mod test {
 
     #[test]
     fn on_network_route_changed() {
-        let mut controller = create_controller(FieldTrials::default(), false);
+        let mut controller = create_controller(FieldTrials::default());
         let current_time: Timestamp = Timestamp::from_millis(123);
         controller.on_network_availability(NetworkAvailability {
             at_time: current_time,
@@ -1333,17 +1333,16 @@ mod test {
         let update =
             controller.on_network_route_change(create_route_change(current_time, None, None, None));
         assert_eq!(update.target_rate.unwrap().target_rate, DEFAULT_MIN_BITRATE);
-        assert_relative_eq!(
-            update.pacer_config.unwrap().data_rate().bps_float(),
-            DEFAULT_MIN_BITRATE.bps_float() * DEFAULT_PACING_RATE,
-            epsilon = 10.0
+        assert_eq!(
+            update.pacer_config.unwrap().data_window,
+            DEFAULT_MIN_BITRATE * DEFAULT_PACING_RATE * PacerConfig::DEFAULT_TIME_INTERVAL
         );
         assert_eq!(update.probe_cluster_configs.len(), 2);
     }
 
     #[test]
     fn probe_on_route_change() {
-        let mut controller = create_controller(FieldTrials::default(), false);
+        let mut controller = create_controller(FieldTrials::default());
         let mut current_time: Timestamp = Timestamp::from_millis(123);
         controller.on_network_availability(NetworkAvailability {
             at_time: current_time,
@@ -1378,7 +1377,7 @@ mod test {
 
     #[test]
     fn probe_after_route_change_when_transport_writable() {
-        let mut controller = create_controller(FieldTrials::default(), false);
+        let mut controller = create_controller(FieldTrials::default());
         let current_time: Timestamp = Timestamp::from_millis(123);
 
         let mut update: NetworkControlUpdate =
@@ -1409,7 +1408,7 @@ mod test {
     // Feedbacks which show an increasing delay cause the estimation to be reduced.
     #[test]
     fn updates_delay_based_estimate() {
-        let mut controller = create_controller(FieldTrials::default(), false);
+        let mut controller = create_controller(FieldTrials::default());
         const RUN_TIME_MS: i64 = 6000;
         let mut current_time: Timestamp = Timestamp::from_millis(123);
         controller.on_network_availability(NetworkAvailability {
@@ -1440,89 +1439,12 @@ mod test {
     }
 
     #[test]
-    fn pace_at_max_of_lower_link_capacity_and_bwe() {
-        let field_trials = FieldTrials {
-            pace_at_max_of_bwe_and_lower_link_capacity: true,
-            ..Default::default()
-        };
-        let mut controller = create_controller(field_trials, false);
-        let mut current_time: Timestamp = Timestamp::from_millis(123);
-        controller.on_network_availability(NetworkAvailability {
-            at_time: current_time,
-            network_available: true,
-        });
-        controller.on_process_interval(ProcessInterval {
-            at_time: current_time,
-            ..Default::default()
-        });
-        current_time += TimeDelta::from_millis(100);
-        let mut network_estimate: NetworkStateEstimate = NetworkStateEstimate {
-            link_capacity_lower: 10 * INITIAL_BITRATE,
-            ..Default::default()
-        };
-        controller.set_network_state_estimate(Some(network_estimate));
-        // OnNetworkStateEstimate does not trigger processing a new estimate. So add a
-        // dummy loss report to trigger a BWE update in the next process interval.
-        let loss_report = TransportLossReport {
-            start_time: current_time,
-            end_time: current_time,
-            receive_time: current_time,
-            packets_received_delta: 50,
-            packets_lost_delta: 1,
-        };
-        controller.on_transport_loss_report(loss_report);
-        let update = controller.on_process_interval(ProcessInterval {
-            at_time: current_time,
-            ..Default::default()
-        });
-        assert!(update.pacer_config.is_some());
-        assert!(update.target_rate.is_some());
-        assert!(update.target_rate.unwrap().target_rate < network_estimate.link_capacity_lower);
-        assert_eq!(
-            update.pacer_config.unwrap().data_rate().kbps_float(),
-            network_estimate.link_capacity_lower.kbps_float() * DEFAULT_PACING_RATE
-        );
-
-        current_time += TimeDelta::from_millis(100);
-        // Set a low link capacity estimate and verify that pacing rate is set
-        // relative to loss based/delay based estimate.
-        network_estimate = NetworkStateEstimate {
-            link_capacity_lower: 0.5 * INITIAL_BITRATE,
-            ..Default::default()
-        };
-        controller.set_network_state_estimate(Some(network_estimate));
-        // Again, we need to inject a dummy loss report to trigger an update of the
-        // BWE in the next process interval.
-        let loss_report = TransportLossReport {
-            start_time: current_time,
-            end_time: current_time,
-            receive_time: current_time,
-            packets_received_delta: 50,
-            packets_lost_delta: 0,
-        };
-        controller.on_transport_loss_report(loss_report);
-        let update = controller.on_process_interval(ProcessInterval {
-            at_time: current_time,
-            ..Default::default()
-        });
-        assert!(update.target_rate.is_some());
-        assert!(
-            update.target_rate.as_ref().unwrap().target_rate > network_estimate.link_capacity_lower
-        );
-        // NOTE: These are off by 4 bps
-        assert_eq!(
-            update.pacer_config.unwrap().data_rate().kbps(),
-            (update.target_rate.unwrap().target_rate * DEFAULT_PACING_RATE).kbps(),
-        );
-    }
-
-    #[test]
     fn limit_pacing_factor_to_upper_link_capacity() {
         let field_trials = FieldTrials {
             limit_pacing_factor_by_upper_link_capacity_estimate: true,
             ..Default::default()
         };
-        let mut controller = create_controller(field_trials, false);
+        let mut controller = create_controller(field_trials);
         let mut current_time: Timestamp = Timestamp::from_millis(123);
         controller.on_network_availability(NetworkAvailability {
             at_time: current_time,
@@ -1565,7 +1487,7 @@ mod test {
     /*
     #[test]
     fn CongestionWindowPushbackOnNetworkDelay() {
-    let factory = CreateFeedbackOnlyFactory();
+    let factory = GoogCcNetworkControllerFactory::default();
           let field_trials = FieldTrials {
            congestion_window: experiments::CongestionWindowConfig { queue_size_ms: 800, min_bitrate_bps: 30000, ..Default::default() }
            ..Default::default()
@@ -1604,7 +1526,7 @@ mod test {
     // Test congestion window pushback on network delay happens.
     #[test]
     fn CongestionWindowPushbackDropFrameOnNetworkDelay() {
-    let factory = CreateFeedbackOnlyFactory();
+    let factory = GoogCcNetworkControllerFactory::default();
           let field_trials = FieldTrials {
            congestion_window: experiments::CongestionWindowConfig { queue_size_ms: 800, min_bitrate_bps: 30000, drop_frame: true, ..Default::default() }
            ..Default::default()
@@ -1729,57 +1651,7 @@ mod test {
 
     /*
     #[test]
-    fn StableEstimateDoesNotVaryInSteadyState() {
-    let factory = CreateFeedbackOnlyFactory();
-      let s = Scenario::new("googcc_unit/stable_target", false);
-      let mut config = CallClientConfig::default();
-      config.transport.cc_factory = &factory;
-      let mut net_conf = NetworkSimulationConfig::default();
-      net_conf.bandwidth = DataRate::KilobitsPerSec(500);
-      net_conf.delay = TimeDelta::Millis(100);
-    let send_net = s.CreateSimulationNode(net_conf);
-    let ret_net = s.CreateSimulationNode(net_conf);
-
-    let client = CreateVideoSendingClient(&s, config, {send_net}, {ret_net});
-      // Run for a while to allow the estimate to stabilize.
-      s.RunFor(TimeDelta::Seconds(30));
-      let min_stable_target: DataRate = DataRate::plus_infinity();
-      let max_stable_target: DataRate = DataRate::minus_infinity();
-      let min_target: DataRate = DataRate::plus_infinity();
-      let max_target: DataRate = DataRate::minus_infinity();
-
-      // Measure variation in steady state.
-       for i in 0..20 {
-    let stable_target_rate = client.stable_target_rate();
-    let target_rate = client.target_rate();
-        assert!(stable_target_rate <= target_rate);
-
-        min_stable_target = std::cmp::min(min_stable_target, stable_target_rate);
-        max_stable_target = std::cmp::max(max_stable_target, stable_target_rate);
-        min_target = std::cmp::min(min_target, target_rate);
-        max_target = std::cmp::max(max_target, target_rate);
-        s.RunFor(TimeDelta::Seconds(1));
-      }
-      // We should expect drops by at least 15% (default backoff.)
-      assert!(min_target / max_target < 0.85);
-      // We should expect the stable target to be more stable than the immediate one
-      assert!(min_stable_target / max_stable_target >= min_target / max_target);
-    }
-    */
-
-    /*
-    #[test]
-    fn LossBasedControlUpdatesTargetRateBasedOnLinkCapacity() {
-      ScopedFieldTrials trial("WebRTC-Bwe-LossBasedControl/Enabled/");
-      // TODO(srte): Should the behavior be unaffected at low loss rates?
-      UpdatesTargetRateBasedOnLinkCapacity("_loss_based");
-    }
-    */
-
-    /*
-    #[test]
     fn LossBasedControlDoesModestBackoffToHighLoss() {
-      ScopedFieldTrials trial("WebRTC-Bwe-LossBasedControl/Enabled/");
       let s = Scenario::new("googcc_unit/high_loss_channel", false);
       let mut config = CallClientConfig::default();
       config.transport.rates.min_rate = DataRate::KilobitsPerSec(10);
@@ -1796,7 +1668,6 @@ mod test {
     let client = CreateVideoSendingClient(&s, config, {send_net}, {ret_net});
 
       s.RunFor(TimeDelta::Seconds(120));
-      // Without LossBasedControl trial, bandwidth drops to ~10 kbps.
       EXPECT_GT(client.target_rate().kbps(), 100);
     }
     */
@@ -2176,27 +2047,89 @@ mod test {
     */
 
     #[test]
-    fn calculates_rtt_from_transport_feedback() {
-        let mut controller = create_controller(FieldTrials::default(), true);
-        let mut current_time: Timestamp = Timestamp::from_millis(123);
-        let one_way_delay: TimeDelta = TimeDelta::from_millis(10);
-        let mut rtt: Option<TimeDelta> = None;
+    fn triggers_target_rate_update_when_bandwidth_limited_changes() {
+        let mut controller = create_controller(FieldTrials::default());
+        let mut current_time = Timestamp::from_millis(123456);
 
-        let feedback: TransportPacketsFeedback = create_transport_packets_feedback(
-            /*per_packet_network_delay=*/ TimeDelta::from_millis(50),
-            one_way_delay,
-            /*send_time=*/ current_time,
-        );
-        controller.on_transport_packets_feedback(feedback);
-        current_time += TimeDelta::from_millis(50);
+        controller.on_network_availability(NetworkAvailability {
+            at_time: current_time,
+            network_available: true,
+        });
         let update = controller.on_process_interval(ProcessInterval {
             at_time: current_time,
             ..Default::default()
         });
-        if let Some(target_rate) = update.target_rate {
-            rtt = Some(target_rate.network_estimate.round_trip_time);
+        assert!(update.target_rate.unwrap().is_bandwidth_limited);
+
+        // Send packet to initialize ALR detector
+        let mut sent_packet = SentPacket {
+            send_time: current_time,
+            size: DataSize::from_bytes(1000),
+            ..Default::default()
+        };
+        controller.on_sent_packet(sent_packet);
+
+        // Wait 10 seconds without sending any packets (this will make budget ratio
+        // accumulate and enter ALR)
+        current_time += TimeDelta::from_seconds(10);
+        // Send a tiny packet to trigger AlrDetector state change evaluation
+        sent_packet.send_time = current_time;
+        sent_packet.size = DataSize::from_bytes(1);
+        let update = controller.on_sent_packet(sent_packet);
+
+        let mut alr_detected = false;
+        if update
+            .target_rate
+            .is_some_and(|target_rate| !target_rate.is_bandwidth_limited)
+        {
+            alr_detected = true;
+        } else {
+            // Process interval should trigger target rate update if not already
+            // triggered by OnSentPacket
+            let update = controller.on_process_interval(ProcessInterval {
+                at_time: current_time,
+                ..Default::default()
+            });
+            if update
+                .target_rate
+                .is_some_and(|target_rate| !target_rate.is_bandwidth_limited)
+            {
+                alr_detected = true;
+            }
         }
-        assert!(rtt.is_some());
-        assert_eq!(rtt.unwrap().ms(), 2 * one_way_delay.ms());
+        assert!(alr_detected);
+
+        // Now send a large burst of packets to leave ALR.
+        // Target rate is INITIAL_BITRATE (60kbps). Budget ratio needs to drop below
+        // 0.5. We send 50 packets of 1000 bytes.
+        let mut bandwidth_limited_detected = false;
+        for _ in 0..50 {
+            current_time += TimeDelta::from_millis(1);
+            sent_packet.send_time = current_time;
+            sent_packet.size = DataSize::from_bytes(1000);
+            let update = controller.on_sent_packet(sent_packet);
+            if update
+                .target_rate
+                .is_some_and(|target_rate| target_rate.is_bandwidth_limited)
+            {
+                bandwidth_limited_detected = true;
+            }
+        }
+
+        if !bandwidth_limited_detected {
+            // Process interval should trigger target rate update if not already
+            // triggered by OnSentPacket
+            let update = controller.on_process_interval(ProcessInterval {
+                at_time: current_time,
+                ..Default::default()
+            });
+            if update
+                .target_rate
+                .is_some_and(|target_rate| target_rate.is_bandwidth_limited)
+            {
+                bandwidth_limited_detected = true;
+            }
+        }
+        assert!(bandwidth_limited_detected);
     }
 }

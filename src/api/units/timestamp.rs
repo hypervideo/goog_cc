@@ -69,6 +69,10 @@ impl Timestamp {
         self.to_value_float()
     }
 
+    pub const fn ns(&self) -> i64 {
+        self.to_multiple(1000)
+    }
+
     pub const fn seconds_or(&self, fallback_value: i64) -> i64 {
         self.to_fraction_or(1_000_000, fallback_value)
     }
@@ -216,6 +220,7 @@ mod test {
         assert_eq!(TIMESTAMP_SECONDS.seconds(), VALUE);
         assert_eq!(TIMESTAMP_MS.ms(), VALUE);
         assert_eq!(TIMESTAMP_US.us(), VALUE);
+        assert_eq!(TIMESTAMP_US.ns(), VALUE * 1000);
     }
 
     #[test]
@@ -286,6 +291,12 @@ mod test {
             Timestamp::from_millis(MAX_INT as _).us(),
             MAX_INT as i64 * 1000
         );
+    }
+
+    #[test]
+    fn can_be_negative() {
+        assert_eq!(Timestamp::from_micros(-1).us(), -1);
+        assert_eq!(format!("{:?}", Timestamp::from_millis(-100)), "-100 ms");
     }
 
     #[test]

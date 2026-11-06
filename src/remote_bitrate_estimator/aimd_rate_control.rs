@@ -285,22 +285,6 @@ impl AimdRateControl {
         let increase_rate_bps_per_second: f64 = (avg_packet_size / response_time).bps_float();
         increase_rate_bps_per_second.max(MIN_INCREASE_RATE_BPS_PER_SECOND)
     }
-    // Returns the expected time between overuse signals (assuming steady state).
-    pub fn get_expected_bandwidth_period(&self) -> TimeDelta {
-        const MIN_PERIOD: TimeDelta = TimeDelta::from_seconds(2);
-        const DEFAULT_PERIOD: TimeDelta = TimeDelta::from_seconds(3);
-        const MAX_PERIOD: TimeDelta = TimeDelta::from_seconds(50);
-
-        let increase_rate_bps_per_second: f64 = self.get_near_max_increase_rate_bps_per_second();
-        if let Some(last_decrease) = self.last_decrease {
-            let time_to_recover_decrease_seconds: f64 =
-                last_decrease.bps_float() / increase_rate_bps_per_second;
-            let period: TimeDelta = TimeDelta::from_seconds_float(time_to_recover_decrease_seconds);
-            period.clamp(MIN_PERIOD, MAX_PERIOD)
-        } else {
-            DEFAULT_PERIOD
-        }
-    }
 
     // Update the target bitrate based on, among other things, the current rate
     // control state, the current target bitrate and the estimated throughput.
@@ -490,10 +474,6 @@ mod test {
 
     const INITIAL_TIME: Timestamp = Timestamp::from_millis(123_456);
 
-    const MIN_BWE_PERIOD: TimeDelta = TimeDelta::from_seconds(2);
-    const DEFAULT_PERIOD: TimeDelta = TimeDelta::from_seconds(3);
-    const MAX_BWE_PERIOD: TimeDelta = TimeDelta::from_seconds(50);
-
     // After an overuse, we back off to 85% to the received bitrate.
     const FRACTION_AFTER_OVERUSE: f64 = 0.85;
 
@@ -529,7 +509,7 @@ mod test {
     }
 
     #[test]
-    fn get_increase_rate_and_bandwidth_period() {
+    fn get_increase_rate() {
         let mut aimd_rate_control = AimdRateControl::default();
         const BITRATE: DataRate = DataRate::from_bits_per_sec(300_000);
         aimd_rate_control.set_estimate(BITRATE, INITIAL_TIME);
@@ -540,10 +520,6 @@ mod test {
         assert!(
             (aimd_rate_control.get_near_max_increase_rate_bps_per_second() - 14_000.0).abs()
                 <= 1_000.0,
-        );
-        assert_eq!(
-            aimd_rate_control.get_expected_bandwidth_period(),
-            DEFAULT_PERIOD
         );
     }
 
@@ -599,33 +575,9 @@ mod test {
     }
 
     #[test]
-    fn default_period_until_first_overuse() {
+    fn typical_drop() {
         let mut aimd_rate_control = AimdRateControl::default();
-        aimd_rate_control.set_start_bitrate(DataRate::from_kilobits_per_sec(300));
-        assert_eq!(
-            aimd_rate_control.get_expected_bandwidth_period(),
-            DEFAULT_PERIOD
-        );
-        aimd_rate_control.update(
-            RateControlInput::new(
-                BandwidthUsage::Overusing,
-                Some(DataRate::from_kilobits_per_sec(280)),
-            ),
-            INITIAL_TIME,
-        );
-        assert_ne!(
-            aimd_rate_control.get_expected_bandwidth_period(),
-            DEFAULT_PERIOD
-        );
-    }
-
-    #[test]
-    fn expected_period_after_typical_drop() {
-        let mut aimd_rate_control = AimdRateControl::default();
-        // The rate increase at 216 kbps should be 12 kbps. If we drop from
-        // 216 + 4*12 = 264 kbps, it should take 4 seconds to recover. Since we
-        // back off to 0.85*acked_rate-5kbps, the acked bitrate needs to be 260
-        // kbps to end up at 216 kbps.
+        // The rate increase at 216 kbps should be 12 kbps.
         const INITIAL_BITRATE: DataRate = DataRate::from_bits_per_sec(264_000);
         const UPDATED_BITRATE: DataRate = DataRate::from_bits_per_sec(216_000);
         let acked_bitrate: DataRate =
@@ -641,50 +593,6 @@ mod test {
         assert_eq!(
             aimd_rate_control.get_near_max_increase_rate_bps_per_second(),
             12_000.0
-        );
-        assert_eq!(
-            aimd_rate_control.get_expected_bandwidth_period(),
-            TimeDelta::from_seconds(4)
-        );
-    }
-
-    #[test]
-    fn bandwidth_period_is_not_below_min() {
-        let mut aimd_rate_control = AimdRateControl::default();
-        const INITIAL_BITRATE: DataRate = DataRate::from_bits_per_sec(10_000);
-        let mut now: Timestamp = INITIAL_TIME;
-        aimd_rate_control.set_estimate(INITIAL_BITRATE, now);
-        now += TimeDelta::from_millis(100);
-        // Make a small (1.5 kbps) bitrate drop to 8.5 kbps.
-        aimd_rate_control.update(
-            RateControlInput::new(
-                BandwidthUsage::Overusing,
-                Some(INITIAL_BITRATE - DataRate::from_bits_per_sec(1)),
-            ),
-            now,
-        );
-        assert_eq!(
-            aimd_rate_control.get_expected_bandwidth_period(),
-            MIN_BWE_PERIOD
-        );
-    }
-
-    #[test]
-    fn bandwidth_period_is_not_above_max_no_smoothing_exp() {
-        let mut aimd_rate_control = AimdRateControl::default();
-        const INITIAL_BITRATE: DataRate = DataRate::from_bits_per_sec(10_010_000);
-        let mut now: Timestamp = INITIAL_TIME;
-        aimd_rate_control.set_estimate(INITIAL_BITRATE, now);
-        now += TimeDelta::from_millis(100);
-        // Make a large (10 Mbps) bitrate drop to 10 kbps.
-        let acked_bitrate: DataRate = DataRate::from_bits_per_sec(10_000) / FRACTION_AFTER_OVERUSE;
-        aimd_rate_control.update(
-            RateControlInput::new(BandwidthUsage::Overusing, Some(acked_bitrate)),
-            now,
-        );
-        assert_eq!(
-            aimd_rate_control.get_expected_bandwidth_period(),
-            MAX_BWE_PERIOD
         );
     }
 
@@ -938,10 +846,12 @@ mod test {
         if cfg!(debug_assertions) {
             return;
         }
-        let mut aimd_rate_control = AimdRateControl::default();
-        aimd_rate_control.bitrate_is_initialized = true;
-        aimd_rate_control.current_bitrate = DataRate::zero();
-        aimd_rate_control.latest_estimated_throughput = CONGESTION_CONTROLLER_MIN_BITRATE;
+        let mut aimd_rate_control = AimdRateControl {
+            bitrate_is_initialized: true,
+            current_bitrate: DataRate::zero(),
+            latest_estimated_throughput: CONGESTION_CONTROLLER_MIN_BITRATE,
+            ..Default::default()
+        };
         aimd_rate_control
             .link_capacity
             .on_overuse_detected(CONGESTION_CONTROLLER_MIN_BITRATE);

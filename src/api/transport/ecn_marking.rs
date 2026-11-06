@@ -11,11 +11,11 @@
 // TODO: bugs.webrtc.org/42225697 - L4S support is slowly being developed.
 // Help is appreciated.
 
-// L4S Explicit Congestion Notification (ECN) ->
+// L4S Explicit Congestion Notification (ECN) .
 // https://www.rfc-editor.org/rfc/rfc9331.html ECT stands for ECN-Capable
 // Transport and CE stands for Congestion Experienced.
 
-// RFC-3168, Section 5
+// https://www.rfc-editor.org/rfc/rfc3168.html#section-5
 // +-----+-----+
 // | ECN FIELD |
 // +-----+-----+
@@ -26,10 +26,28 @@
 //    1     1         CE
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
 pub enum EcnMarking {
     #[default]
-    NotEct = 0, // Not ECN-Capable Transport
-    Ect1 = 1, // ECN-Capable Transport
-    Ect0 = 2, // Not used by L4s (or webrtc.)
-    Ce = 3,   // Congestion experienced
+    NotEct = 0b00, // Not ECN-Capable Transport
+    Ect1 = 0b01, // ECN-Capable Transport
+    Ect0 = 0b10, // Not used by L4S (or webrtc.)
+    Ce = 0b11,   // Congestion experienced
+}
+
+impl EcnMarking {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            EcnMarking::NotEct => "none",
+            EcnMarking::Ect1 => "ect1",
+            EcnMarking::Ect0 => "ect0",
+            EcnMarking::Ce => "ce",
+        }
+    }
+}
+
+impl std::fmt::Display for EcnMarking {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }

@@ -28,7 +28,7 @@ pub struct StreamsConfig {
     /// If `enable_repeated_initial_probing` is set to true, Probes are sent
     /// periodically every 1s during the first 5s after the network becomes
     /// available. The probes ignores max_total_allocated_bitrate.
-    pub enable_repeated_initial_probing: Option<bool>,
+    pub enable_repeated_initial_probing: bool,
     pub pacing_factor: Option<f64>,
 
     // TODO(srte): Use BitrateAllocationLimits here.
@@ -42,7 +42,7 @@ impl Default for StreamsConfig {
         Self {
             at_time: Timestamp::plus_infinity(),
             requests_alr_probing: None,
-            enable_repeated_initial_probing: None,
+            enable_repeated_initial_probing: false,
             pacing_factor: None,
             min_total_allocated_bitrate: None,
             max_padding_rate: None,
@@ -344,7 +344,7 @@ impl TransportPacketsFeedback {
 
     pub fn sorted_by_receive_time(&self) -> Vec<PacketResult> {
         let mut res: Vec<PacketResult> = self.received_with_send_info().cloned().collect();
-        res.sort_by(|a, b| a.receive_time.cmp(&b.receive_time));
+        res.sort_by_key(|a| a.receive_time);
         res
     }
 }
@@ -355,7 +355,6 @@ pub struct NetworkEstimate {
     /// Deprecated, use TargetTransferRate::target_rate instead.
     pub bandwidth: DataRate,
     pub round_trip_time: TimeDelta,
-    pub bwe_period: TimeDelta,
 
     pub loss_rate_ratio: f32,
 }
@@ -366,7 +365,6 @@ impl Default for NetworkEstimate {
             at_time: Timestamp::plus_infinity(),
             bandwidth: DataRate::infinity(),
             round_trip_time: TimeDelta::plus_infinity(),
-            bwe_period: TimeDelta::plus_infinity(),
             loss_rate_ratio: 0.0,
         }
     }
@@ -376,6 +374,8 @@ impl Default for NetworkEstimate {
 pub struct PacerConfig {
     pub at_time: Timestamp,
     /// Pacer should send at most data_window data over time_window duration.
+    /// If `time_window` is zero, the pacer should pace every packet as accurately
+    /// as possible, and [`Self::data_rate`] is `data_window` over 1s.
     pub data_window: DataSize,
     pub time_window: TimeDelta,
     /// Pacer should send at least pad_window data over time_window duration.
@@ -394,11 +394,37 @@ impl Default for PacerConfig {
 }
 
 impl PacerConfig {
+    pub const DEFAULT_TIME_INTERVAL: TimeDelta = TimeDelta::from_millis(40);
+
+    pub fn create(
+        at_time: Timestamp,
+        send_rate: DataRate,
+        pad_rate: DataRate,
+        time_window: TimeDelta,
+    ) -> Self {
+        let mut pacer_config = PacerConfig {
+            at_time,
+            time_window,
+            ..Default::default()
+        };
+        // Note that precision is lost here, since DataSize store number of bytes.
+        pacer_config.data_window = send_rate * pacer_config.rate_window();
+        pacer_config.pad_window = pad_rate * pacer_config.rate_window();
+        pacer_config
+    }
+
+    pub fn rate_window(&self) -> TimeDelta {
+        if self.time_window.is_zero() {
+            TimeDelta::from_seconds(1)
+        } else {
+            self.time_window
+        }
+    }
     pub fn data_rate(&self) -> DataRate {
-        self.data_window / self.time_window
+        self.data_window / self.rate_window()
     }
     pub fn pad_rate(&self) -> DataRate {
-        self.pad_window / self.time_window
+        self.pad_window / self.rate_window()
     }
 }
 
@@ -433,8 +459,11 @@ pub struct TargetTransferRate {
     /// The estimate on which the target rate is based on.
     pub network_estimate: NetworkEstimate,
     pub target_rate: DataRate,
-    pub stable_target_rate: DataRate,
     pub cwnd_reduce_ratio: f64,
+
+    /// True if WebRTC is actively sending near estimated link capacity (not in
+    /// ALR).
+    pub is_bandwidth_limited: bool,
 }
 
 impl Default for TargetTransferRate {
@@ -443,8 +472,8 @@ impl Default for TargetTransferRate {
             at_time: Timestamp::plus_infinity(),
             network_estimate: NetworkEstimate::default(),
             target_rate: DataRate::zero(),
-            stable_target_rate: DataRate::zero(),
             cwnd_reduce_ratio: 0.0,
+            is_bandwidth_limited: true,
         }
     }
 }

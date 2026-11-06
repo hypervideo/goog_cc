@@ -57,6 +57,7 @@ pub struct ProbeControllerConfig {
 
     // Configures the probes emitted by changed to the allocated bitrate.
     pub probe_max_allocation: bool,
+    pub probe_max_allocation_without_alr: bool,
     pub alloc_p1: f64,
     pub alloc_p2: f64,
     pub alloc_current_bwe_limit: f64,
@@ -96,6 +97,7 @@ impl Default for ProbeControllerConfig {
             network_state_probe_duration: TimeDelta::from_millis(15),
             network_state_min_probe_delta: TimeDelta::from_millis(20),
             probe_max_allocation: true,
+            probe_max_allocation_without_alr: true,
             alloc_p1: 1.0,
             alloc_p2: 2.0,
             alloc_current_bwe_limit: 2.0,
@@ -278,10 +280,10 @@ impl ProbeController {
         at_time: Timestamp,
     ) -> Vec<ProbeClusterConfig> {
         let in_alr: bool = self.alr_start_time.is_some();
-        let allow_allocation_probe: bool = in_alr;
+        let allow_allocation_probe: bool = in_alr || self.config.probe_max_allocation_without_alr;
         if self.config.probe_max_allocation
             && matches!(self.state, State::ProbingComplete)
-            && max_total_allocated_bitrate != self.max_total_allocated_bitrate
+            && max_total_allocated_bitrate > self.max_total_allocated_bitrate
             && self.estimated_bitrate < self.max_bitrate
             && self.estimated_bitrate < max_total_allocated_bitrate
             && allow_allocation_probe
@@ -404,11 +406,11 @@ impl ProbeController {
         self.repeated_initial_probing_enabled = enable;
     }
 
-    pub fn set_alr_start_time_ms(&mut self, alr_start_time: Option<i64>) {
-        self.alr_start_time = alr_start_time.map(Timestamp::from_millis);
+    pub fn set_alr_start_time(&mut self, alr_start_time: Option<Timestamp>) {
+        self.alr_start_time = alr_start_time;
     }
-    pub fn set_alr_ended_time_ms(&mut self, alr_end_time: i64) {
-        self.alr_end_time = Some(Timestamp::from_millis(alr_end_time));
+    pub fn set_alr_ended_time(&mut self, alr_end_time: Timestamp) {
+        self.alr_end_time = Some(alr_end_time);
     }
 
     pub fn request_probe(&mut self, at_time: Timestamp) -> Vec<ProbeClusterConfig> {
@@ -599,20 +601,21 @@ impl ProbeController {
         };
 
         match self.network_estimate {
-            Some(network_estimate) if network_estimate.link_capacity_upper.is_finite() => {
-                if self.config.network_state_interval.is_finite() {
-                    if network_estimate.link_capacity_upper.is_zero() {
-                        tracing::debug!("Not sending probe, Network state estimate is zero");
-                        return vec![];
-                    }
-                    max_probe_bitrate = std::cmp::min(
-                        max_probe_bitrate,
-                        std::cmp::max(
-                            self.estimated_bitrate,
-                            network_estimate.link_capacity_upper * self.config.network_state_scale,
-                        ),
-                    );
+            Some(network_estimate)
+                if network_estimate.link_capacity_upper.is_finite()
+                    && self.config.network_state_interval.is_finite() =>
+            {
+                if network_estimate.link_capacity_upper.is_zero() {
+                    tracing::debug!("Not sending probe, Network state estimate is zero");
+                    return vec![];
                 }
+                max_probe_bitrate = std::cmp::min(
+                    max_probe_bitrate,
+                    std::cmp::max(
+                        self.estimated_bitrate,
+                        network_estimate.link_capacity_upper * self.config.network_state_scale,
+                    ),
+                );
             }
             _ => (),
         };
@@ -912,9 +915,10 @@ mod test {
     }
 
     #[test]
-    fn probes_on_max_allocated_bitrate_increase_only_when_in_alr() {
+    fn probes_in_alr_when_allocation_probing_outside_alr_is_disabled() {
         let mut clock = Timestamp::zero();
         let mut probe_controller = ProbeController::new(ProbeControllerConfig {
+            probe_max_allocation_without_alr: false,
             ..Default::default()
         });
         assert!(probe_controller
@@ -936,17 +940,115 @@ mod test {
         assert!(probes.is_empty());
 
         // Probe when in alr.
-        probe_controller.set_alr_start_time_ms(Some(clock.ms()));
+        probe_controller.set_alr_start_time(Some(clock));
         let probes = probe_controller
             .on_max_total_allocated_bitrate(MAX_BITRATE + DataRate::from_bits_per_sec(1), clock);
         assert_eq!(probes.len(), 2);
         assert_eq!(probes[0].target_data_rate, MAX_BITRATE);
+    }
 
-        // Do not probe when not in alr.
-        probe_controller.set_alr_start_time_ms(None);
-        let probes = probe_controller
-            .on_max_total_allocated_bitrate(MAX_BITRATE + DataRate::from_bits_per_sec(2), clock);
+    #[test]
+    fn probes_on_max_allocated_bitrate_increase_outside_alr_by_default() {
+        let mut clock = Timestamp::zero();
+        let mut probe_controller = ProbeController::new(ProbeControllerConfig::default());
+        const TRANSPORT_MAX_BITRATE: DataRate = DataRate::from_kilobits_per_sec(10000);
+        const ESTIMATED_AFTER_INITIAL_PROBING: DataRate = DataRate::from_kilobits_per_sec(300);
+        const SCREEN_SHARE_MAX_BITRATE: DataRate = DataRate::from_kilobits_per_sec(3500);
+
+        assert!(probe_controller
+            .on_network_availability(NetworkAvailability {
+                network_available: true,
+                ..Default::default()
+            })
+            .is_empty());
+        probe_controller.set_bitrates(MIN_BITRATE, START_BITRATE, TRANSPORT_MAX_BITRATE, clock);
+        probe_controller.set_estimated_bitrate(
+            ESTIMATED_AFTER_INITIAL_PROBING,
+            BandwidthLimitedCause::DelayBasedLimited,
+            clock,
+        );
+        clock += EXPONENTIAL_PROBING_TIMEOUT;
+        let probes = probe_controller.process(clock);
         assert!(probes.is_empty());
+
+        probe_controller.set_alr_start_time(None);
+        let probes =
+            probe_controller.on_max_total_allocated_bitrate(SCREEN_SHARE_MAX_BITRATE, clock);
+        assert_eq!(probes.len(), 1);
+        assert_eq!(
+            probes[0].target_data_rate,
+            2 * ESTIMATED_AFTER_INITIAL_PROBING
+        );
+    }
+
+    #[test]
+    fn allocation_probing_outside_alr_can_be_disabled() {
+        let mut clock = Timestamp::zero();
+        let mut probe_controller = ProbeController::new(ProbeControllerConfig {
+            probe_max_allocation_without_alr: false,
+            ..Default::default()
+        });
+        const TRANSPORT_MAX_BITRATE: DataRate = DataRate::from_kilobits_per_sec(10000);
+        const ESTIMATED_AFTER_INITIAL_PROBING: DataRate = DataRate::from_kilobits_per_sec(300);
+        const SCREEN_SHARE_MAX_BITRATE: DataRate = DataRate::from_kilobits_per_sec(3500);
+
+        assert!(probe_controller
+            .on_network_availability(NetworkAvailability {
+                network_available: true,
+                ..Default::default()
+            })
+            .is_empty());
+        probe_controller.set_bitrates(MIN_BITRATE, START_BITRATE, TRANSPORT_MAX_BITRATE, clock);
+        probe_controller.set_estimated_bitrate(
+            ESTIMATED_AFTER_INITIAL_PROBING,
+            BandwidthLimitedCause::DelayBasedLimited,
+            clock,
+        );
+        clock += EXPONENTIAL_PROBING_TIMEOUT;
+        let probes = probe_controller.process(clock);
+        assert!(probes.is_empty());
+
+        probe_controller.set_alr_start_time(None);
+        assert!(probe_controller
+            .on_max_total_allocated_bitrate(SCREEN_SHARE_MAX_BITRATE, clock)
+            .is_empty());
+    }
+
+    #[test]
+    fn does_not_probe_when_max_allocated_bitrate_decreases() {
+        let mut clock = Timestamp::zero();
+        let mut probe_controller = ProbeController::new(ProbeControllerConfig::default());
+
+        assert!(probe_controller
+            .on_network_availability(NetworkAvailability {
+                network_available: true,
+                ..Default::default()
+            })
+            .is_empty());
+        let probes = probe_controller.set_bitrates(MIN_BITRATE, START_BITRATE, MAX_BITRATE, clock);
+        assert!(!probes.is_empty());
+
+        // Set the initial allocation while initial probing is still in progress.
+        assert!(probe_controller
+            .on_max_total_allocated_bitrate(MAX_BITRATE, clock)
+            .is_empty());
+        probe_controller.set_estimated_bitrate(
+            START_BITRATE,
+            BandwidthLimitedCause::DelayBasedLimited,
+            clock,
+        );
+        clock += EXPONENTIAL_PROBING_TIMEOUT;
+        assert!(probe_controller.process(clock).is_empty());
+
+        // A lower allocation should update the limit without triggering a probe.
+        assert!(probe_controller
+            .on_max_total_allocated_bitrate(MAX_BITRATE / 2, clock)
+            .is_empty());
+
+        // A subsequent increase from the lower allocation should trigger probing.
+        let probes =
+            probe_controller.on_max_total_allocated_bitrate(MAX_BITRATE * 3 / 4_i64, clock);
+        assert!(!probes.is_empty());
     }
 
     #[test]
@@ -976,7 +1078,7 @@ mod test {
         assert!(probes.is_empty());
 
         // Probe when in alr.
-        probe_controller.set_alr_start_time_ms(Some(clock.ms()));
+        probe_controller.set_alr_start_time(Some(clock));
         let probes = probe_controller.on_max_total_allocated_bitrate(MAX_BITRATE, clock);
         assert_eq!(probes.len(), 1);
         assert_eq!(probes[0].target_data_rate, 2.0 * START_BITRATE);
@@ -1013,10 +1115,10 @@ mod test {
         clock += EXPONENTIAL_PROBING_TIMEOUT;
         let probes = probe_controller.process(clock);
         assert!(probes.is_empty());
-        probe_controller.set_alr_start_time_ms(Some(clock.ms()));
+        probe_controller.set_alr_start_time(Some(clock));
 
         // Do no probe, since probe_max_allocation:false.
-        probe_controller.set_alr_start_time_ms(Some(clock.ms()));
+        probe_controller.set_alr_start_time(Some(clock));
         let probes = probe_controller
             .on_max_total_allocated_bitrate(MAX_BITRATE + DataRate::from_bits_per_sec(1), clock);
         assert!(probes.is_empty());
@@ -1295,7 +1397,7 @@ mod test {
             clock,
         );
 
-        probe_controller.set_alr_start_time_ms(Some(clock.ms()));
+        probe_controller.set_alr_start_time(Some(clock));
         clock += ALR_PROBE_INTERVAL + TimeDelta::from_millis(1);
         probe_controller.process(clock);
         probe_controller.set_estimated_bitrate(
@@ -1329,7 +1431,7 @@ mod test {
             clock,
         );
 
-        probe_controller.set_alr_start_time_ms(None);
+        probe_controller.set_alr_start_time(None);
         clock += ALR_PROBE_INTERVAL + TimeDelta::from_millis(1);
         probe_controller.process(clock);
         probe_controller.set_estimated_bitrate(
@@ -1337,7 +1439,7 @@ mod test {
             BandwidthLimitedCause::DelayBasedLimited,
             clock,
         );
-        probe_controller.set_alr_ended_time_ms(clock.ms());
+        probe_controller.set_alr_ended_time(clock);
         clock += ALR_ENDED_TIMEOUT - TimeDelta::from_millis(1);
         let probes = probe_controller.request_probe(clock);
 
@@ -1365,7 +1467,7 @@ mod test {
             clock,
         );
 
-        probe_controller.set_alr_start_time_ms(None);
+        probe_controller.set_alr_start_time(None);
         clock += ALR_PROBE_INTERVAL + TimeDelta::from_millis(1);
         probe_controller.process(clock);
         probe_controller.set_estimated_bitrate(
@@ -1373,7 +1475,7 @@ mod test {
             BandwidthLimitedCause::DelayBasedLimited,
             clock,
         );
-        probe_controller.set_alr_ended_time_ms(clock.ms());
+        probe_controller.set_alr_ended_time(clock);
         clock += ALR_ENDED_TIMEOUT + TimeDelta::from_millis(1);
         let probes = probe_controller.request_probe(clock);
         assert!(probes.is_empty());
@@ -1399,7 +1501,7 @@ mod test {
             clock,
         );
 
-        probe_controller.set_alr_start_time_ms(Some(clock.ms()));
+        probe_controller.set_alr_start_time(Some(clock));
         clock += ALR_PROBE_INTERVAL + TimeDelta::from_millis(1);
         probe_controller.process(clock);
         probe_controller.set_estimated_bitrate(
@@ -1436,7 +1538,7 @@ mod test {
         let start_time: Timestamp = clock;
 
         // Expect the controller to send a new probe after 5s has passed.
-        probe_controller.set_alr_start_time_ms(Some(start_time.ms()));
+        probe_controller.set_alr_start_time(Some(start_time));
         clock += TimeDelta::from_seconds(5);
         let probes = probe_controller.process(clock);
         assert_eq!(probes.len(), 1);
@@ -1449,7 +1551,7 @@ mod test {
         );
 
         // The following probe should be sent at 10s into ALR.
-        probe_controller.set_alr_start_time_ms(Some(start_time.ms()));
+        probe_controller.set_alr_start_time(Some(start_time));
         clock += TimeDelta::from_seconds(4);
         probe_controller.process(clock);
         let probes = probe_controller.set_estimated_bitrate(
@@ -1459,7 +1561,7 @@ mod test {
         );
         assert!(probes.is_empty());
 
-        probe_controller.set_alr_start_time_ms(Some(start_time.ms()));
+        probe_controller.set_alr_start_time(Some(start_time));
         clock += TimeDelta::from_seconds(1);
         let probes = probe_controller.process(clock);
         assert_eq!(probes.len(), 1);
@@ -1485,7 +1587,7 @@ mod test {
             .is_empty());
         let alr_start_time: Timestamp = clock;
 
-        probe_controller.set_alr_start_time_ms(Some(alr_start_time.ms()));
+        probe_controller.set_alr_start_time(Some(alr_start_time));
         probe_controller.enable_periodic_alr_probing(true);
         probe_controller.set_bitrates(MIN_BITRATE, START_BITRATE, MAX_BITRATE, clock);
         probe_controller.reset(clock);
@@ -1594,7 +1696,7 @@ mod test {
         // Configure ALR for periodic probing.
         probe_controller.enable_periodic_alr_probing(true);
         let alr_start_time: Timestamp = clock;
-        probe_controller.set_alr_start_time_ms(Some(alr_start_time.ms()));
+        probe_controller.set_alr_start_time(Some(alr_start_time));
 
         let estimated_bitrate: DataRate = MAX_BITRATE / 10;
         probe_controller.set_estimated_bitrate(
@@ -1679,7 +1781,7 @@ mod test {
         clock += TimeDelta::from_seconds(5);
         probe_controller.process(clock);
 
-        probe_controller.set_alr_start_time_ms(Some(clock.ms()));
+        probe_controller.set_alr_start_time(Some(clock));
         let probes = probe_controller
             .on_max_total_allocated_bitrate(DataRate::from_kilobits_per_sec(200), clock);
         assert_eq!(probes.len(), 1);
@@ -1706,7 +1808,7 @@ mod test {
             clock,
         );
         // Expect the controller to send a new probe after 5s has passed.
-        probe_controller.set_alr_start_time_ms(Some(clock.ms()));
+        probe_controller.set_alr_start_time(Some(clock));
         clock += TimeDelta::from_seconds(5);
         let probes = probe_controller.process(clock);
         assert_eq!(probes.len(), 1);
@@ -1840,7 +1942,7 @@ mod test {
             BandwidthLimitedCause::DelayBasedLimited,
             clock,
         );
-        probe_controller.set_alr_start_time_ms(Some(clock.ms()));
+        probe_controller.set_alr_start_time(Some(clock));
 
         clock += TimeDelta::from_seconds(5);
         let probes = probe_controller.process(clock);
@@ -1922,7 +2024,7 @@ mod test {
         assert!(probes.is_empty());
 
         // Probe when in alr.
-        probe_controller.set_alr_start_time_ms(Some(clock.ms()));
+        probe_controller.set_alr_start_time(Some(clock));
         clock += ALR_PROBE_INTERVAL + TimeDelta::from_millis(1);
         let probes = probe_controller.process(clock);
         assert_eq!(probes.len(), 1);
@@ -1955,7 +2057,7 @@ mod test {
         assert!(probes.is_empty());
 
         // Not probe in alr when loss based estimate decreases.
-        probe_controller.set_alr_start_time_ms(Some(clock.ms()));
+        probe_controller.set_alr_start_time(Some(clock));
         clock += ALR_PROBE_INTERVAL + TimeDelta::from_millis(1);
         let probes = probe_controller.process(clock);
         assert!(probes.is_empty());
@@ -1986,7 +2088,7 @@ mod test {
         let probes = probe_controller.process(clock);
         assert!(probes.is_empty());
 
-        probe_controller.set_alr_start_time_ms(None);
+        probe_controller.set_alr_start_time(None);
         clock += ALR_PROBE_INTERVAL + TimeDelta::from_millis(1);
         let probes = probe_controller.process(clock);
         assert!(probes.is_empty());
@@ -2334,7 +2436,7 @@ mod test {
         );
         assert!(probes.is_empty());
 
-        probe_controller.set_alr_start_time_ms(Some(clock.ms()));
+        probe_controller.set_alr_start_time(Some(clock));
         clock += TimeDelta::from_seconds(10);
         let probes = probe_controller.process(clock);
         assert!(probes.is_empty());
@@ -2368,7 +2470,7 @@ mod test {
         );
 
         clock += TimeDelta::from_seconds(10);
-        probe_controller.set_alr_start_time_ms(Some(clock.ms()));
+        probe_controller.set_alr_start_time(Some(clock));
         let probes = probe_controller.on_max_total_allocated_bitrate(MAX_BITRATE / 2, clock);
         // No probes since total allocated is not higher than the current estimate.
         assert!(probes.is_empty());
@@ -2499,7 +2601,7 @@ mod test {
         let probes = probe_controller.process(clock);
         assert!(probes.is_empty());
 
-        probe_controller.set_alr_start_time_ms(Some(clock.ms()));
+        probe_controller.set_alr_start_time(Some(clock));
         probe_controller.set_network_state_estimate(NetworkStateEstimate {
             link_capacity_upper: START_BITRATE / 2,
             ..Default::default()

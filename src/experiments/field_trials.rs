@@ -3,9 +3,8 @@ use super::{AlrExperimentSettings, CongestionWindowConfig, VideoRateControlConfi
 use crate::{
     remote_bitrate_estimator::{BweBackOffFactor, EstimateBoundedIncrease},
     AlrDetectorConfig, BitrateEstimatorConfig, BweLossExperiment, BweSeparateAudioPacketsSettings,
-    LossBasedBweV2Config, LossBasedControlConfig, ProbeControllerConfig,
-    RobustThroughputEstimatorSettings, RttBasedBackoffConfig, SafeResetOnRouteChange,
-    TrendlineEstimatorSettings,
+    LossBasedBweV2Config, ProbeControllerConfig, RobustThroughputEstimatorSettings,
+    RttBasedBackoffConfig, SafeResetOnRouteChange, TrendlineEstimatorSettings,
 };
 
 /// Current field trials for WebRTC that impact GoogCC.
@@ -47,9 +46,6 @@ pub struct FieldTrials {
     /// WebRTC-Bwe-SeparateAudioPackets
     pub separate_audio_packets: BweSeparateAudioPacketsSettings,
 
-    /// WebRTC-Bwe-LossBasedControl
-    pub loss_based_control: LossBasedControlConfig,
-
     /// LossBasedBweV2Config
     pub loss_based_bwe_v2: LossBasedBweV2Config,
 
@@ -76,9 +72,6 @@ pub struct FieldTrials {
 
     /// WebRTC-Bwe-LimitProbesLowerThanThroughputEstimate
     pub limit_probes_lower_than_throughput_estimate: bool,
-
-    /// WebRTC-Bwe-PaceAtMaxOfBweAndLowerLinkCapacity
-    pub pace_at_max_of_bwe_and_lower_link_capacity: bool,
 
     /// WebRTC-Bwe-LimitPacingFactorByUpperLinkCapacityEstimate
     pub limit_pacing_factor_by_upper_link_capacity_estimate: bool,
@@ -109,7 +102,6 @@ impl Default for FieldTrials {
             video_rate_control: VideoRateControlConfig::default(),
             vp8_base_heavy_tl3_alloc: false,
             separate_audio_packets: BweSeparateAudioPacketsSettings::default(),
-            loss_based_control: LossBasedControlConfig::default(),
             loss_based_bwe_v2: LossBasedBweV2Config::default(),
             max_rtt_limit: RttBasedBackoffConfig::default(),
             trendline_estimator_settings: TrendlineEstimatorSettings::default(),
@@ -119,7 +111,6 @@ impl Default for FieldTrials {
             min_alloc_as_lower_bound: true,
             ignore_probes_lower_than_network_state_estimate: true,
             limit_probes_lower_than_throughput_estimate: true,
-            pace_at_max_of_bwe_and_lower_link_capacity: false,
             limit_pacing_factor_by_upper_link_capacity_estimate: false,
             safe_reset_on_route_change: SafeResetOnRouteChange::default(),
             bwe_throughput_window_config: BitrateEstimatorConfig::default(),

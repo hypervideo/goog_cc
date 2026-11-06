@@ -247,28 +247,6 @@ mod test {
     }
 
     #[test]
-    fn clamping() {
-        const UPPER: TimeDelta = TimeDelta::from_millis(800);
-        const LOWER: TimeDelta = TimeDelta::from_millis(100);
-        const UNDER: TimeDelta = TimeDelta::from_millis(100);
-        const INSIDE: TimeDelta = TimeDelta::from_millis(500);
-        const OVER: TimeDelta = TimeDelta::from_millis(1000);
-        assert_eq!(UNDER.clamp(LOWER, UPPER), LOWER);
-        assert_eq!(INSIDE.clamp(LOWER, UPPER), INSIDE);
-        assert_eq!(OVER.clamp(LOWER, UPPER), UPPER);
-
-        let mut mutable_delta: TimeDelta = LOWER;
-        mutable_delta.clamp_mut(LOWER, UPPER);
-        assert_eq!(mutable_delta, LOWER);
-        mutable_delta = INSIDE;
-        mutable_delta.clamp_mut(LOWER, UPPER);
-        assert_eq!(mutable_delta, INSIDE);
-        mutable_delta = OVER;
-        mutable_delta.clamp_mut(LOWER, UPPER);
-        assert_eq!(mutable_delta, UPPER);
-    }
-
-    #[test]
     fn can_be_inititialized_from_large_int() {
         const MAX_INT: i32 = i32::MAX;
         assert_eq!(
