@@ -181,10 +181,12 @@ impl AcknowledgedBitrateEstimatorInterface for RobustThroughputEstimator {
             // In most cases, receive timestamps should already be in order, but in the
             // rare case where feedback packets have been reordered, we do some swaps to
             // ensure that the window is sorted.
-            for i in (1..self.window.len()).rev() {
-                if self.window[i].receive_time < self.window[i - 1].receive_time {
-                    self.window.swap(i, i - 1);
-                }
+            // The window was sorted before the push, so the new packet only moves
+            // back until its neighbor is in order.
+            let mut i = self.window.len() - 1;
+            while i > 0 && self.window[i].receive_time < self.window[i - 1].receive_time {
+                self.window.swap(i, i - 1);
+                i -= 1;
             }
 
             const MAX_REORDERING_TIME: TimeDelta = TimeDelta::from_seconds(1);
@@ -713,6 +715,42 @@ mod test {
             let throughput = throughput_estimator.bitrate();
             assert_eq!(throughput.unwrap(), send_rate);
         }
+    }
+
+    #[test]
+    fn reordered_feedback_keeps_window_sorted() {
+        let mut feedback_generator = FeedbackGenerator::default();
+        let send_rate: DataRate = DataRate::from_bytes_per_sec(100000);
+        let recv_rate: DataRate = DataRate::from_bytes_per_sec(100000);
+        let packets: Vec<PacketResult> = feedback_generator.create_feedback(
+            40,
+            DataSize::from_bytes(1000),
+            send_rate,
+            recv_rate,
+        );
+
+        let mut in_order_estimator = RobustThroughputEstimator::default();
+        in_order_estimator.incoming_packet_feedback(&packets);
+
+        // Feedback arrives one packet at a time, and packets 10 to 14 arrive
+        // after packet 30.
+        let mut reordered_estimator = RobustThroughputEstimator::default();
+        for i in (0..10).chain(15..31).chain(10..15).chain(31..40) {
+            reordered_estimator.incoming_packet_feedback(&packets[i..=i]);
+        }
+
+        let sequence_numbers = |estimator: &RobustThroughputEstimator| -> Vec<i64> {
+            estimator
+                .window
+                .iter()
+                .map(|packet| packet.sent_packet.sequence_number)
+                .collect()
+        };
+        assert_eq!(
+            sequence_numbers(&reordered_estimator),
+            sequence_numbers(&in_order_estimator)
+        );
+        assert_eq!(reordered_estimator.bitrate(), in_order_estimator.bitrate());
     }
 
     #[test]
