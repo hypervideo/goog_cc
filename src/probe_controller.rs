@@ -26,7 +26,7 @@ pub struct ProbeControllerConfig {
     // times the size of the last sent probe we'll send another one of size
     // step_size times the new estimate.
     pub p1: f64,
-    pub p2: f64,
+    pub p2: Option<f64>,
     pub step_size: f64,
     pub further_probe_threshold: f64,
     pub abort_further: bool,
@@ -61,8 +61,8 @@ pub struct ProbeControllerConfig {
     // Configures the probes emitted by changed to the allocated bitrate.
     pub probe_max_allocation: bool,
     pub probe_max_allocation_without_alr: bool,
-    pub alloc_p1: f64,
-    pub alloc_p2: f64,
+    pub alloc_p1: Option<f64>,
+    pub alloc_p2: Option<f64>,
     pub alloc_current_bwe_limit: f64,
 
     // The minimum number probing packets used.
@@ -84,7 +84,7 @@ impl Default for ProbeControllerConfig {
     fn default() -> Self {
         Self {
             p1: 3.0,
-            p2: 6.0,
+            p2: Some(6.0),
             step_size: 2.0,
             further_probe_threshold: 0.7,
             abort_further: false,
@@ -101,8 +101,8 @@ impl Default for ProbeControllerConfig {
             network_state_min_probe_delta: TimeDelta::from_millis(20),
             probe_max_allocation: true,
             probe_max_allocation_without_alr: true,
-            alloc_p1: 1.0,
-            alloc_p2: 2.0,
+            alloc_p1: Some(1.0),
+            alloc_p2: Some(2.0),
             alloc_current_bwe_limit: 2.0,
             min_probe_packets_sent: 5,
             min_probe_duration: TimeDelta::from_millis(15),
@@ -302,11 +302,11 @@ impl ProbeController {
         {
             self.max_total_allocated_bitrate = max_total_allocated_bitrate;
 
-            if self.config.alloc_p1 == 0.0 {
+            let Some(alloc_p1) = self.config.alloc_p1 else {
                 return vec![];
-            }
+            };
 
-            let mut first_probe_rate: DataRate = max_total_allocated_bitrate * self.config.alloc_p1;
+            let mut first_probe_rate: DataRate = max_total_allocated_bitrate * alloc_p1;
             let current_bwe_limit: DataRate =
                 self.config.alloc_current_bwe_limit * self.estimated_bitrate;
             let mut limited_by_current_bwe: bool = current_bwe_limit < first_probe_rate;
@@ -315,16 +315,18 @@ impl ProbeController {
             }
 
             let mut probes: Vec<DataRate> = vec![first_probe_rate];
-            if self.config.alloc_p2 > 0.0 && !limited_by_current_bwe {
-                let mut second_probe_rate: DataRate =
-                    max_total_allocated_bitrate * self.config.alloc_p2;
-                limited_by_current_bwe = current_bwe_limit < second_probe_rate;
-                if limited_by_current_bwe {
-                    second_probe_rate = current_bwe_limit;
+            match self.config.alloc_p2 {
+                Some(alloc_p2) if !limited_by_current_bwe => {
+                    let mut second_probe_rate: DataRate = max_total_allocated_bitrate * alloc_p2;
+                    limited_by_current_bwe = current_bwe_limit < second_probe_rate;
+                    if limited_by_current_bwe {
+                        second_probe_rate = current_bwe_limit;
+                    }
+                    if second_probe_rate > first_probe_rate {
+                        probes.push(second_probe_rate);
+                    }
                 }
-                if second_probe_rate > first_probe_rate {
-                    probes.push(second_probe_rate);
-                }
+                _ => {}
             }
 
             let allow_further_probing: bool = limited_by_current_bwe;
@@ -539,8 +541,8 @@ impl ProbeController {
         // When probing at 1.8 Mbps ( 6x 300), this represents a threshold of
         // 1.2 Mbps to continue probing.
         let mut probes: Vec<DataRate> = vec![self.config.p1 * self.start_bitrate];
-        if self.config.p2 > 0.0 {
-            probes.push(self.config.p2 * self.start_bitrate);
+        if let Some(p2) = self.config.p2.filter(|&p2| p2 > 0.0) {
+            probes.push(p2 * self.start_bitrate);
         }
 
         if self.repeated_initial_probing_enabled && self.max_total_allocated_bitrate.is_zero() {
@@ -862,7 +864,7 @@ mod test {
         let clock = Timestamp::zero();
         let mut probe_controller = ProbeController::new(ProbeControllerConfig {
             p1: 2.0,
-            p2: 3.0,
+            p2: Some(3.0),
             ..Default::default()
         });
         assert!(probe_controller
@@ -882,7 +884,7 @@ mod test {
         let clock = Timestamp::zero();
         let mut probe_controller = ProbeController::new(ProbeControllerConfig {
             p1: 2.0,
-            p2: 0.0,
+            p2: Some(0.0),
             ..Default::default()
         });
         assert!(probe_controller
@@ -992,6 +994,40 @@ mod test {
             probes[0].target_data_rate,
             2 * ESTIMATED_AFTER_INITIAL_PROBING
         );
+    }
+
+    /// Without a first allocation probe scale, an allocation increase sends no
+    /// probe.
+    #[test]
+    fn allocation_probing_off_without_first_allocation_scale() {
+        let mut clock = Timestamp::zero();
+        let mut probe_controller = ProbeController::new(ProbeControllerConfig {
+            alloc_p1: None,
+            ..Default::default()
+        });
+        const TRANSPORT_MAX_BITRATE: DataRate = DataRate::from_kilobits_per_sec(10000);
+        const ESTIMATED_AFTER_INITIAL_PROBING: DataRate = DataRate::from_kilobits_per_sec(300);
+        const SCREEN_SHARE_MAX_BITRATE: DataRate = DataRate::from_kilobits_per_sec(3500);
+
+        assert!(probe_controller
+            .on_network_availability(NetworkAvailability {
+                network_available: true,
+                ..Default::default()
+            })
+            .is_empty());
+        probe_controller.set_bitrates(MIN_BITRATE, START_BITRATE, TRANSPORT_MAX_BITRATE, clock);
+        probe_controller.set_estimated_bitrate(
+            ESTIMATED_AFTER_INITIAL_PROBING,
+            BandwidthLimitedCause::DelayBasedLimited,
+            clock,
+        );
+        clock += EXPONENTIAL_PROBING_TIMEOUT;
+        let probes = probe_controller.process(clock);
+        assert!(probes.is_empty());
+
+        assert!(probe_controller
+            .on_max_total_allocated_bitrate(SCREEN_SHARE_MAX_BITRATE, clock)
+            .is_empty());
     }
 
     #[test]
@@ -1785,12 +1821,12 @@ mod test {
         // "WebRTC-Bwe-ProbingConfiguration/p1:2,p2:5,step_size:3,further_probe_threshold:0.8,alloc_p1:2,alloc_current_bwe_limit:1000.0,alloc_p2,min_probe_packets_sent:2/"
         let mut probe_controller = ProbeController::new(ProbeControllerConfig {
             p1: 2.0,
-            p2: 5.0,
+            p2: Some(5.0),
             step_size: 3.0,
             further_probe_threshold: 0.8,
-            alloc_p1: 2.0,
+            alloc_p1: Some(2.0),
             alloc_current_bwe_limit: 1000.0,
-            alloc_p2: 0.0,
+            alloc_p2: None,
             min_probe_packets_sent: 2,
             ..Default::default()
         });
