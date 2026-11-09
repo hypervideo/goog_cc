@@ -735,11 +735,10 @@ impl NetworkControllerInterface for GoogCcNetworkController {
         }
         let mut max_feedback_rtt: TimeDelta = TimeDelta::minus_infinity();
         let mut min_propagation_rtt: TimeDelta = TimeDelta::plus_infinity();
-        let max_recv_time = report
+        let max_recv_time: Timestamp = report
             .received_with_send_info()
             .map(|x| x.receive_time)
-            .max()
-            .unwrap();
+            .fold(Timestamp::minus_infinity(), std::cmp::max);
 
         for feedback in report.received_with_send_info() {
             let feedback_rtt: TimeDelta = report.feedback_time - feedback.sent_packet.send_time;
@@ -2131,5 +2130,38 @@ mod test {
             }
         }
         assert!(bandwidth_limited_detected);
+    }
+
+    /// Feedback that reports only lost packets is processed without a panic.
+    ///
+    /// No packet in it has a receive time, so the latest receive time stays at
+    /// minus infinity, as in libwebrtc, and the losses still reach the
+    /// loss-based estimator.
+    #[test]
+    fn feedback_with_only_lost_packets_does_not_panic() {
+        let mut controller = create_controller(FieldTrials::default());
+        let mut current_time = Timestamp::from_millis(123456);
+        controller.on_network_availability(NetworkAvailability {
+            at_time: current_time,
+            network_available: true,
+        });
+        controller.on_process_interval(ProcessInterval {
+            at_time: current_time,
+            ..Default::default()
+        });
+
+        let lost_packet = create_packet_result(
+            Timestamp::plus_infinity(),
+            current_time,
+            1000,
+            PacedPacketInfo::default(),
+        );
+        controller.on_sent_packet(lost_packet.sent_packet);
+        current_time += TimeDelta::from_millis(100);
+        controller.on_transport_packets_feedback(TransportPacketsFeedback {
+            feedback_time: current_time,
+            packet_feedbacks: vec![lost_packet],
+            ..Default::default()
+        });
     }
 }
