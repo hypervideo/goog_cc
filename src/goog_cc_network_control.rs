@@ -2156,4 +2156,69 @@ mod test {
             ..Default::default()
         });
     }
+
+    /// A periodic ALR probe waits for the ALR probing interval after ALR starts.
+    ///
+    /// The initial probes go out at T, and ALR starts at T+6s, after a second
+    /// without packets. The next ALR probe is due 5s after the later of the
+    /// two, at T+11s.
+    #[test]
+    fn alr_probe_follows_alr_start_by_alr_interval() {
+        let mut controller = create_controller(FieldTrials::default());
+        let start = Timestamp::from_millis(123456);
+        controller.on_network_availability(NetworkAvailability {
+            at_time: start,
+            network_available: true,
+        });
+        let update = controller.on_process_interval(ProcessInterval {
+            at_time: start,
+            ..Default::default()
+        });
+        assert!(!update.probe_cluster_configs.is_empty());
+        controller.on_streams_config(StreamsConfig {
+            at_time: start,
+            requests_alr_probing: Some(true),
+            ..Default::default()
+        });
+
+        let mut probe_times: Vec<Timestamp> = Vec::new();
+        let mut now = start;
+        while now < start + TimeDelta::from_seconds(11) {
+            now += TimeDelta::from_millis(25);
+            let update = controller.on_process_interval(ProcessInterval {
+                at_time: now,
+                ..Default::default()
+            });
+            if !update.probe_cluster_configs.is_empty() {
+                probe_times.push(now);
+            }
+
+            // The packet at T+5s starts the ALR detector's clock, and the
+            // 1-byte packet at T+6s starts ALR. Their feedback keeps the RTT
+            // short.
+            let size = if now == start + TimeDelta::from_seconds(5) {
+                1000
+            } else if now == start + TimeDelta::from_seconds(6) {
+                1
+            } else {
+                continue;
+            };
+            let packet = create_packet_result(
+                now + TimeDelta::from_millis(5),
+                now,
+                size,
+                PacedPacketInfo::default(),
+            );
+            let update = controller.on_sent_packet(packet.sent_packet);
+            assert!(update.probe_cluster_configs.is_empty());
+            let update = controller.on_transport_packets_feedback(TransportPacketsFeedback {
+                feedback_time: now + TimeDelta::from_millis(10),
+                packet_feedbacks: vec![packet],
+                ..Default::default()
+            });
+            assert!(update.probe_cluster_configs.is_empty());
+        }
+
+        assert_eq!(probe_times, vec![start + TimeDelta::from_seconds(11)]);
+    }
 }
