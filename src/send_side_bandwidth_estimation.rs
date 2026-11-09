@@ -242,7 +242,7 @@ impl SendSideBandwidthEstimation {
             bitrate_threshold,
             loss_based_bandwidth_estimator_v2,
             loss_based_state: LossBasedState::DelayBasedEstimate,
-            disable_receiver_limit_caps_only: field_trials.receiver_limit_caps_only,
+            disable_receiver_limit_caps_only: field_trials.disable_receiver_limit_caps_only,
             acknowledged_rate: None,
             field_trials,
         }
@@ -936,5 +936,41 @@ mod test {
         bwe.update_loss_based_estimator(&feedback, BandwidthUsage::Normal, None, false);
 
         assert_eq!(bwe.target_rate(), DataRate::from_kilobits_per_sec(100));
+    }
+
+    /// Sends at 1000kbps, limits the receiver to 300kbps and lifts the limit
+    /// again. Returns the target rate after the limit is lifted.
+    fn target_rate_after_lifted_receiver_limit(disable_receiver_limit_caps_only: bool) -> DataRate {
+        let mut bwe = SendSideBandwidthEstimation::new(FieldTrials {
+            disable_receiver_limit_caps_only,
+            ..Default::default()
+        });
+        let now = Timestamp::from_seconds(1);
+        bwe.set_send_bitrate(DataRate::from_kilobits_per_sec(1000), now);
+        bwe.update_receiver_estimate(now, DataRate::from_kilobits_per_sec(300));
+        assert_eq!(bwe.target_rate(), DataRate::from_kilobits_per_sec(300));
+
+        bwe.update_receiver_estimate(now, DataRate::plus_infinity());
+        bwe.target_rate()
+    }
+
+    /// By default, the receiver limit caps only the reported target, so the
+    /// target returns to 1000kbps once the limit is lifted.
+    #[test]
+    fn receiver_limit_caps_only_reported_target_by_default() {
+        assert_eq!(
+            target_rate_after_lifted_receiver_limit(false),
+            DataRate::from_kilobits_per_sec(1000)
+        );
+    }
+
+    /// With `disable_receiver_limit_caps_only`, the receiver limit lowers the
+    /// target itself, which stays at 300kbps once the limit is lifted.
+    #[test]
+    fn disabled_receiver_limit_caps_only_limits_target() {
+        assert_eq!(
+            target_rate_after_lifted_receiver_limit(true),
+            DataRate::from_kilobits_per_sec(300)
+        );
     }
 }
