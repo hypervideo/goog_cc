@@ -73,8 +73,8 @@ pub struct BitrateEstimator {
     estimate_floor: DataRate,
     current_window_ms: i64,
     prev_time_ms: i64,
-    bitrate_estimate_kbps: f64,
-    bitrate_estimate_var: f64,
+    bitrate_estimate_kbps: f32,
+    bitrate_estimate_var: f32,
 }
 
 impl Default for BitrateEstimator {
@@ -111,7 +111,7 @@ impl BitrateEstimator {
             rate_window_ms = self.initial_window_ms;
         }
         let mut is_small_sample: bool = false;
-        let bitrate_sample_kbps: f64 = self.update_window(
+        let bitrate_sample_kbps: f32 = self.update_window(
             at_time.ms(),
             amount.bytes(),
             rate_window_ms,
@@ -127,34 +127,34 @@ impl BitrateEstimator {
         }
         // Optionally use higher uncertainty for very small samples to avoid dropping
         // estimate and for samples obtained in ALR.
-        let mut scale: f64 = self.uncertainty_scale;
+        let mut scale: f32 = self.uncertainty_scale as f32;
         if is_small_sample && bitrate_sample_kbps < self.bitrate_estimate_kbps {
-            scale = self.small_sample_uncertainty_scale;
+            scale = self.small_sample_uncertainty_scale as f32;
         } else if in_alr && bitrate_sample_kbps < self.bitrate_estimate_kbps {
             // Optionally use higher uncertainty for samples obtained during ALR.
-            scale = self.uncertainty_scale_in_alr;
+            scale = self.uncertainty_scale_in_alr as f32;
         }
         // Define the sample uncertainty as a function of how far away it is from the
         // current estimate. With low values of self.uncertainty_symmetry_cap we add more
         // uncertainty to increases than to decreases. For higher values we approach
         // symmetry.
-        let sample_uncertainty: f64 = scale
+        let sample_uncertainty: f32 = scale
             * (self.bitrate_estimate_kbps - bitrate_sample_kbps).abs()
             / (self.bitrate_estimate_kbps
-                + bitrate_sample_kbps.max(self.uncertainty_symmetry_cap.kbps_float()));
+                + bitrate_sample_kbps.min(self.uncertainty_symmetry_cap.kbps_float() as f32));
 
-        let sample_var: f64 = sample_uncertainty * sample_uncertainty;
+        let sample_var: f32 = sample_uncertainty * sample_uncertainty;
         // Update a bayesian estimate of the rate, weighting it lower if the sample
         // uncertainty is large.
         // The bitrate estimate uncertainty is increased with each update to model
         // that the bitrate changes over time.
-        let pred_bitrate_estimate_var: f64 = self.bitrate_estimate_var + 5.0;
+        let pred_bitrate_estimate_var: f32 = self.bitrate_estimate_var + 5.0;
         self.bitrate_estimate_kbps = (sample_var * self.bitrate_estimate_kbps
             + pred_bitrate_estimate_var * bitrate_sample_kbps)
             / (sample_var + pred_bitrate_estimate_var);
         self.bitrate_estimate_kbps = self
             .bitrate_estimate_kbps
-            .max(self.estimate_floor.kbps_float());
+            .max(self.estimate_floor.kbps_float() as f32);
         self.bitrate_estimate_var =
             sample_var * pred_bitrate_estimate_var / (sample_var + pred_bitrate_estimate_var);
     }
@@ -164,7 +164,7 @@ impl BitrateEstimator {
             return None;
         }
         Some(DataRate::from_kilobits_per_sec_float(
-            self.bitrate_estimate_kbps,
+            self.bitrate_estimate_kbps as f64,
         ))
     }
 
@@ -189,7 +189,7 @@ impl BitrateEstimator {
         bytes: i64,
         rate_window_ms: i64,
         is_small_sample: &mut bool,
-    ) -> f64 {
+    ) -> f32 {
         // Reset if time moves backwards.
         if now_ms < self.prev_time_ms {
             self.prev_time_ms = -1;
@@ -205,14 +205,43 @@ impl BitrateEstimator {
             }
         }
         self.prev_time_ms = now_ms;
-        let mut bitrate_sample: f64 = -1.0;
+        let mut bitrate_sample: f32 = -1.0;
         if self.current_window_ms >= rate_window_ms {
             *is_small_sample = self.sum < self.small_sample_threshold.bytes();
-            bitrate_sample = 8.0 * self.sum as f64 / (rate_window_ms) as f64;
+            bitrate_sample = 8.0 * self.sum as f32 / rate_window_ms as f32;
             self.current_window_ms -= rate_window_ms;
             self.sum = 0;
         }
         self.sum += bytes;
         bitrate_sample
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// A higher sample counts toward its uncertainty's denominator only up to
+    /// the symmetry cap.
+    ///
+    /// The initial 500ms window gives 800kbps and the next 150ms window
+    /// 1600kbps. With the default cap of zero, the sample uncertainty is
+    /// 10 * |800 - 1600| / (800 + min(1600, 0)) = 10. Against a predicted
+    /// variance of 50 + 5 = 55, the estimate moves to
+    /// (10^2 * 800 + 55 * 1600) / (10^2 + 55) = 1083.9kbps.
+    #[test]
+    fn symmetry_cap_limits_sample_in_uncertainty() {
+        let mut estimator = BitrateEstimator::default();
+        let mut now = Timestamp::from_seconds(10);
+        for _ in 0..50 {
+            estimator.update(now, DataSize::from_bytes(1000), false);
+            now += TimeDelta::from_millis(10);
+        }
+        for _ in 0..16 {
+            estimator.update(now, DataSize::from_bytes(2000), false);
+            now += TimeDelta::from_millis(10);
+        }
+
+        assert_eq!(estimator.bitrate().unwrap().kbps(), 1084);
     }
 }
