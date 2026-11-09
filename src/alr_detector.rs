@@ -13,7 +13,6 @@ use crate::{
     experiments::AlrExperimentSettings,
     pacing::IntervalBudget,
 };
-use web_time::Instant;
 
 #[derive(Clone, Debug)]
 pub struct AlrDetectorConfig {
@@ -54,9 +53,6 @@ pub struct AlrDetector {
 
     alr_budget: IntervalBudget,
     alr_started_time: Option<Timestamp>,
-
-    // Replacement for the environment's clock.
-    start: Instant,
 }
 
 impl Default for AlrDetector {
@@ -72,7 +68,6 @@ impl AlrDetector {
             last_send_time: None,
             alr_budget: IntervalBudget::new(0, true),
             alr_started_time: None,
-            start: Instant::now(),
         }
     }
 
@@ -95,9 +90,10 @@ impl AlrDetector {
         if self.alr_budget.budget_ratio() > self.conf.start_budget_level_ratio
             && self.alr_started_time.is_none()
         {
-            self.alr_started_time = Some(Timestamp::from_micros(
-                self.start.elapsed().as_micros() as i64
-            ));
+            // libwebrtc stamps the start with the current time of its
+            // environment's clock. Callers pass `send_time` on that clock, at
+            // the time of the call.
+            self.alr_started_time = Some(send_time);
         } else if self.alr_budget.budget_ratio() < self.conf.stop_budget_level_ratio
             && self.alr_started_time.is_some()
         {

@@ -33,19 +33,10 @@ use super::{
     ProbeBitrateEstimator, ProbeClusterObservation, ProbeController, SendSideBandwidthEstimation,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SafeResetOnRouteChange {
     pub enabled: bool, // Enabled
     pub ack: bool,     // ack
-}
-
-impl Default for SafeResetOnRouteChange {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            ack: true,
-        }
-    }
 }
 
 /// Google Congestion Control specific configuration.
@@ -151,7 +142,7 @@ impl GoogCcNetworkController {
             limit_pacingfactor_by_upper_link_capacity_estimate: field_trials
                 .limit_pacing_factor_by_upper_link_capacity_estimate,
 
-            probe_controller: ProbeController::new(field_trials.probing_configuration.clone()),
+            probe_controller: ProbeController::from_field_trials(&field_trials),
             congestion_window_pushback_controller: rate_control_settings
                 .use_congestion_window_pushback()
                 .then(|| CongestionWindowPushbackController::new(&field_trials)),
@@ -565,16 +556,8 @@ impl NetworkControllerInterface for GoogCcNetworkController {
             self.current_data_window,
         ) {
             (Some(congestion_window_pushback_controller), Some(current_data_window)) => {
-                // Mirror libwebrtc `OnProcessInterval`: refresh pushback's
-                // data-window denominator so its `fill_ratio` keeps tracking
-                // the cwnd numerator that goog_cc just grew. The initial
-                // Rust port (bc95a8d5) called `update_outstanding_data` here
-                // instead, which writes the cwnd into pushback's
-                // outstanding-bytes field — a numerator/denominator swap
-                // that latches `fill_ratio > 1` forever once feedback goes
-                // quiet (standalone uplink hit this; hyper-proper is masked
-                // by continuous feedback running the correct path in
-                // `on_transport_packets_feedback`).
+                // Pushback's fill ratio is the outstanding data over this
+                // window, so it needs the window updated above.
                 congestion_window_pushback_controller.set_data_window(current_data_window)
             }
             _ => update.congestion_window = self.current_data_window,
@@ -735,11 +718,10 @@ impl NetworkControllerInterface for GoogCcNetworkController {
         }
         let mut max_feedback_rtt: TimeDelta = TimeDelta::minus_infinity();
         let mut min_propagation_rtt: TimeDelta = TimeDelta::plus_infinity();
-        let max_recv_time = report
+        let max_recv_time: Timestamp = report
             .received_with_send_info()
             .map(|x| x.receive_time)
-            .max()
-            .unwrap();
+            .fold(Timestamp::minus_infinity(), std::cmp::max);
 
         for feedback in report.received_with_send_info() {
             let feedback_rtt: TimeDelta = report.feedback_time - feedback.sent_packet.send_time;
@@ -820,7 +802,8 @@ impl NetworkControllerInterface for GoogCcNetworkController {
         let result: DelayBasedBweResult = self.delay_based_bwe.incoming_packet_feedback_vector(
             &report,
             acknowledged_bitrate,
-            probe_bitrate, /*self.estimate,*/
+            probe_bitrate,
+            self.estimate,
             alr_start_time.is_some(),
         );
 
@@ -2131,5 +2114,189 @@ mod test {
             }
         }
         assert!(bandwidth_limited_detected);
+    }
+
+    /// Feedback that reports only lost packets is processed without a panic.
+    ///
+    /// No packet in it has a receive time, so the latest receive time stays at
+    /// minus infinity, as in libwebrtc, and the losses still reach the
+    /// loss-based estimator.
+    #[test]
+    fn feedback_with_only_lost_packets_does_not_panic() {
+        let mut controller = create_controller(FieldTrials::default());
+        let mut current_time = Timestamp::from_millis(123456);
+        controller.on_network_availability(NetworkAvailability {
+            at_time: current_time,
+            network_available: true,
+        });
+        controller.on_process_interval(ProcessInterval {
+            at_time: current_time,
+            ..Default::default()
+        });
+
+        let lost_packet = create_packet_result(
+            Timestamp::plus_infinity(),
+            current_time,
+            1000,
+            PacedPacketInfo::default(),
+        );
+        controller.on_sent_packet(lost_packet.sent_packet);
+        current_time += TimeDelta::from_millis(100);
+        controller.on_transport_packets_feedback(TransportPacketsFeedback {
+            feedback_time: current_time,
+            packet_feedbacks: vec![lost_packet],
+            ..Default::default()
+        });
+    }
+
+    /// A periodic ALR probe waits for the ALR probing interval after ALR starts.
+    ///
+    /// The initial probes go out at T, and ALR starts at T+6s, after a second
+    /// without packets. The next ALR probe is due 5s after the later of the
+    /// two, at T+11s.
+    #[test]
+    fn alr_probe_follows_alr_start_by_alr_interval() {
+        let mut controller = create_controller(FieldTrials::default());
+        let start = Timestamp::from_millis(123456);
+        controller.on_network_availability(NetworkAvailability {
+            at_time: start,
+            network_available: true,
+        });
+        let update = controller.on_process_interval(ProcessInterval {
+            at_time: start,
+            ..Default::default()
+        });
+        assert!(!update.probe_cluster_configs.is_empty());
+        controller.on_streams_config(StreamsConfig {
+            at_time: start,
+            requests_alr_probing: Some(true),
+            ..Default::default()
+        });
+
+        let mut probe_times: Vec<Timestamp> = Vec::new();
+        let mut now = start;
+        while now < start + TimeDelta::from_seconds(11) {
+            now += TimeDelta::from_millis(25);
+            let update = controller.on_process_interval(ProcessInterval {
+                at_time: now,
+                ..Default::default()
+            });
+            if !update.probe_cluster_configs.is_empty() {
+                probe_times.push(now);
+            }
+
+            // The packet at T+5s starts the ALR detector's clock, and the
+            // 1-byte packet at T+6s starts ALR. Their feedback keeps the RTT
+            // short.
+            let size = if now == start + TimeDelta::from_seconds(5) {
+                1000
+            } else if now == start + TimeDelta::from_seconds(6) {
+                1
+            } else {
+                continue;
+            };
+            let packet = create_packet_result(
+                now + TimeDelta::from_millis(5),
+                now,
+                size,
+                PacedPacketInfo::default(),
+            );
+            let update = controller.on_sent_packet(packet.sent_packet);
+            assert!(update.probe_cluster_configs.is_empty());
+            let update = controller.on_transport_packets_feedback(TransportPacketsFeedback {
+                feedback_time: now + TimeDelta::from_millis(10),
+                packet_feedbacks: vec![packet],
+                ..Default::default()
+            });
+            assert!(update.probe_cluster_configs.is_empty());
+        }
+
+        assert_eq!(probe_times, vec![start + TimeDelta::from_seconds(11)]);
+    }
+
+    /// Runs a controller with `field_trials` until it has an acknowledged
+    /// bitrate of about 160kbps, then changes the route with a starting rate
+    /// of 300kbps.
+    ///
+    /// Returns the acknowledged bitrate before the route change and the target
+    /// rate after it.
+    fn route_change_after_acknowledged_rate(field_trials: FieldTrials) -> (DataRate, DataRate) {
+        let mut controller = create_controller(field_trials);
+        let mut current_time = Timestamp::from_millis(123);
+        controller.on_network_availability(NetworkAvailability {
+            at_time: current_time,
+            network_available: true,
+        });
+        packet_transmission_and_feedback_block(&mut controller, 6000, 0, &mut current_time);
+        let acknowledged_bitrate = controller.acknowledged_bitrate().unwrap();
+
+        let update = controller.on_network_route_change(create_route_change(
+            current_time,
+            Some(DataRate::from_kilobits_per_sec(300)),
+            None,
+            None,
+        ));
+        (
+            acknowledged_bitrate,
+            update.target_rate.unwrap().target_rate,
+        )
+    }
+
+    /// A route change starts at its own starting rate by default, as
+    /// `WebRTC-Bwe-SafeResetOnRouteChange` is off.
+    #[test]
+    fn route_change_keeps_starting_rate_by_default() {
+        let (acknowledged_bitrate, target_rate) =
+            route_change_after_acknowledged_rate(FieldTrials::default());
+
+        assert!(acknowledged_bitrate < DataRate::from_kilobits_per_sec(300));
+        assert_eq!(target_rate, DataRate::from_kilobits_per_sec(300));
+    }
+
+    /// With `WebRTC-Bwe-SafeResetOnRouteChange/Enabled,ack/`, a route change
+    /// starts at most at the acknowledged bitrate.
+    #[test]
+    fn safe_reset_caps_starting_rate_at_acknowledged_bitrate() {
+        let (acknowledged_bitrate, target_rate) =
+            route_change_after_acknowledged_rate(FieldTrials {
+                safe_reset_on_route_change: SafeResetOnRouteChange {
+                    enabled: true,
+                    ack: true,
+                },
+                ..Default::default()
+            });
+
+        assert!(acknowledged_bitrate < DataRate::from_kilobits_per_sec(300));
+        assert_eq!(target_rate, acknowledged_bitrate);
+    }
+
+    /// The upper link capacity of a network state estimate bounds the
+    /// delay-based estimate's increase.
+    ///
+    /// Without the bound, 6s of feedback without delay raise the target from
+    /// 60kbps to well above 100kbps.
+    #[test]
+    fn network_state_estimate_bounds_delay_based_increase() {
+        let mut controller = create_controller(FieldTrials::default());
+        let mut current_time = Timestamp::from_millis(123);
+        controller.on_network_availability(NetworkAvailability {
+            at_time: current_time,
+            network_available: true,
+        });
+        let link_capacity_upper = DataRate::from_kilobits_per_sec(100);
+        controller.on_network_state_estimate(NetworkStateEstimate {
+            update_time: current_time,
+            link_capacity_upper,
+            ..Default::default()
+        });
+
+        let target_bitrate =
+            packet_transmission_and_feedback_block(&mut controller, 6000, 0, &mut current_time);
+
+        assert_eq!(
+            controller.delay_based_bwe.last_estimate(),
+            link_capacity_upper
+        );
+        assert!(target_bitrate.unwrap() <= link_capacity_upper);
     }
 }

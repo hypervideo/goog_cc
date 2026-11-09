@@ -210,7 +210,7 @@ impl SendSideBandwidthEstimation {
 
         let mut loss_based_bandwidth_estimator_v2 =
             LossBasedBweV2::new(field_trials.loss_based_bwe_v2.clone());
-        if field_trials.loss_based_bwe_v2.enabled {
+        if loss_based_bandwidth_estimator_v2.is_enabled() {
             loss_based_bandwidth_estimator_v2
                 .set_min_max_bitrate(CONGESTION_CONTROLLER_MIN_BITRATE, Self::DEFAULT_MAX_BITRATE);
         }
@@ -242,7 +242,7 @@ impl SendSideBandwidthEstimation {
             bitrate_threshold,
             loss_based_bandwidth_estimator_v2,
             loss_based_state: LossBasedState::DelayBasedEstimate,
-            disable_receiver_limit_caps_only: field_trials.receiver_limit_caps_only,
+            disable_receiver_limit_caps_only: field_trials.disable_receiver_limit_caps_only,
             acknowledged_rate: None,
             field_trials,
         }
@@ -634,7 +634,7 @@ impl SendSideBandwidthEstimation {
     }
 
     fn loss_based_bandwidth_estimator_v2_enabled(&self) -> bool {
-        self.field_trials.loss_based_bwe_v2.enabled
+        self.loss_based_bandwidth_estimator_v2.is_enabled()
     }
 
     fn loss_based_bandwidth_estimator_v2_ready_for_use(&self) -> bool {
@@ -645,6 +645,10 @@ impl SendSideBandwidthEstimation {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::{
+        api::{transport::PacketResult, units::DataSize},
+        LossBasedBweV2Config,
+    };
 
     fn test_probing(use_delay_based: bool) {
         let mut bwe = SendSideBandwidthEstimation::new(Default::default());
@@ -893,5 +897,80 @@ mod test {
             /*propagation_rtt=*/ TimeDelta::from_millis(1000),
         );
         assert!(!bwe.is_rtt_above_limit());
+    }
+
+    /// Loss-based BWE v2 with an invalid configuration is off, so transport
+    /// feedback leaves the target alone.
+    ///
+    /// Were it on, the feedback would run `update_estimate`, which in the
+    /// start phase raises the target of 100kbps to the delay-based limit of
+    /// 500kbps.
+    #[test]
+    fn invalid_loss_based_bwe_v2_config_turns_it_off() {
+        let mut bwe = SendSideBandwidthEstimation::new(FieldTrials {
+            loss_based_bwe_v2: LossBasedBweV2Config {
+                enabled: true,
+                bw_rampup_upper_bound_factor: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let now = Timestamp::from_seconds(1);
+        bwe.set_send_bitrate(DataRate::from_kilobits_per_sec(100), now);
+        bwe.update_delay_based_estimate(now, DataRate::from_kilobits_per_sec(500));
+        assert_eq!(bwe.target_rate(), DataRate::from_kilobits_per_sec(100));
+
+        let feedback = TransportPacketsFeedback {
+            feedback_time: now,
+            packet_feedbacks: vec![PacketResult {
+                sent_packet: SentPacket {
+                    send_time: now - TimeDelta::from_millis(50),
+                    size: DataSize::from_bytes(1000),
+                    ..Default::default()
+                },
+                receive_time: now - TimeDelta::from_millis(25),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        bwe.update_loss_based_estimator(&feedback, BandwidthUsage::Normal, None, false);
+
+        assert_eq!(bwe.target_rate(), DataRate::from_kilobits_per_sec(100));
+    }
+
+    /// Sends at 1000kbps, limits the receiver to 300kbps and lifts the limit
+    /// again. Returns the target rate after the limit is lifted.
+    fn target_rate_after_lifted_receiver_limit(disable_receiver_limit_caps_only: bool) -> DataRate {
+        let mut bwe = SendSideBandwidthEstimation::new(FieldTrials {
+            disable_receiver_limit_caps_only,
+            ..Default::default()
+        });
+        let now = Timestamp::from_seconds(1);
+        bwe.set_send_bitrate(DataRate::from_kilobits_per_sec(1000), now);
+        bwe.update_receiver_estimate(now, DataRate::from_kilobits_per_sec(300));
+        assert_eq!(bwe.target_rate(), DataRate::from_kilobits_per_sec(300));
+
+        bwe.update_receiver_estimate(now, DataRate::plus_infinity());
+        bwe.target_rate()
+    }
+
+    /// By default, the receiver limit caps only the reported target, so the
+    /// target returns to 1000kbps once the limit is lifted.
+    #[test]
+    fn receiver_limit_caps_only_reported_target_by_default() {
+        assert_eq!(
+            target_rate_after_lifted_receiver_limit(false),
+            DataRate::from_kilobits_per_sec(1000)
+        );
+    }
+
+    /// With `disable_receiver_limit_caps_only`, the receiver limit lowers the
+    /// target itself, which stays at 300kbps once the limit is lifted.
+    #[test]
+    fn disabled_receiver_limit_caps_only_limits_target() {
+        assert_eq!(
+            target_rate_after_lifted_receiver_limit(true),
+            DataRate::from_kilobits_per_sec(300)
+        );
     }
 }

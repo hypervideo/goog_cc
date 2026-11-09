@@ -85,8 +85,12 @@ pub struct FieldTrials {
     /// WebRTC-BweLossExperiment
     pub loss_experiment: BweLossExperiment,
 
-    /// WebRTC-Bwe-ReceiverLimitCapsOnly
-    pub receiver_limit_caps_only: bool,
+    /// The `Disabled` flag of WebRTC-Bwe-ReceiverLimitCapsOnly.
+    ///
+    /// By default, the receiver limit caps only the target rate that the
+    /// controller reports. When this is true, it limits the internal target
+    /// like the delay-based estimate does.
+    pub disable_receiver_limit_caps_only: bool,
 }
 
 impl Default for FieldTrials {
@@ -115,7 +119,7 @@ impl Default for FieldTrials {
             safe_reset_on_route_change: SafeResetOnRouteChange::default(),
             bwe_throughput_window_config: BitrateEstimatorConfig::default(),
             loss_experiment: BweLossExperiment::default(),
-            receiver_limit_caps_only: false,
+            disable_receiver_limit_caps_only: false,
         }
     }
 }

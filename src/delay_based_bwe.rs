@@ -10,12 +10,13 @@
 
 use crate::{
     api::{
-        transport::{BandwidthUsage, PacketResult, TransportPacketsFeedback},
+        transport::{BandwidthUsage, NetworkStateEstimate, PacketResult, TransportPacketsFeedback},
         units::{DataRate, DataSize, TimeDelta, Timestamp},
     },
     experiments::FieldTrials,
     remote_bitrate_estimator::{AimdRateControl, RateControlInput},
     DelayIncreaseDetectorInterface, InterArrivalDelta, TrendlineEstimator,
+    TrendlineEstimatorSettings,
 };
 
 // WebRTC-Bwe-SeparateAudioPackets
@@ -78,6 +79,9 @@ pub struct DelayBasedBwe {
     audio_inter_arrival_delta: InterArrivalDelta,
     audio_delay_detector: TrendlineEstimator,
     active_delay_detector_type: DelayDetector,
+    // The settings that the delay detectors are created with, including when
+    // a stream times out.
+    trendline_estimator_settings: TrendlineEstimatorSettings,
 
     last_seen_packet: Timestamp,
     uma_recorded: bool,
@@ -111,6 +115,7 @@ impl DelayBasedBwe {
                 field_trials.trendline_estimator_settings.clone(),
             ),
             active_delay_detector_type: DelayDetector::Video,
+            trendline_estimator_settings: field_trials.trendline_estimator_settings.clone(),
             last_seen_packet: Timestamp::minus_infinity(),
             uma_recorded: false,
             rate_control: AimdRateControl::new(field_trials, true), // send_side
@@ -135,7 +140,7 @@ impl DelayBasedBwe {
         msg: &TransportPacketsFeedback,
         acked_bitrate: Option<DataRate>,
         probe_bitrate: Option<DataRate>,
-        //network_estimate: Option<NetworkStateEstimate>,
+        network_estimate: Option<NetworkStateEstimate>,
         in_alr: bool,
     ) -> DelayBasedBweResult {
         let packet_feedback_vector = msg.sorted_by_receive_time();
@@ -170,7 +175,8 @@ impl DelayBasedBwe {
             return DelayBasedBweResult::default();
         }
         self.rate_control.set_in_application_limited_region(in_alr);
-        //self.rate_control.SetNetworkStateEstimate(network_estimate);
+        self.rate_control
+            .set_network_state_estimate(network_estimate);
         self.maybe_update_estimate(
             acked_bitrate,
             probe_bitrate,
@@ -237,8 +243,10 @@ impl DelayBasedBwe {
             self.video_inter_arrival_delta = InterArrivalDelta::new(Self::SEND_TIME_GROUP_LENGTH);
             self.audio_inter_arrival_delta = InterArrivalDelta::new(Self::SEND_TIME_GROUP_LENGTH);
 
-            self.video_delay_detector = TrendlineEstimator::default();
-            self.audio_delay_detector = TrendlineEstimator::default();
+            self.video_delay_detector =
+                TrendlineEstimator::new(self.trendline_estimator_settings.clone());
+            self.audio_delay_detector =
+                TrendlineEstimator::new(self.trendline_estimator_settings.clone());
             self.active_delay_detector_type = DelayDetector::Video;
         }
         self.last_seen_packet = at_time;
@@ -668,6 +676,7 @@ mod test {
                 self.acknowledged_bitrate_estimator.bitrate(),
                 self.probe_bitrate_estimator
                     .fetch_and_reset_last_estimated_bitrate(),
+                None,
                 /*in_alr*/ false,
             );
             if result.updated {
@@ -722,6 +731,7 @@ mod test {
                     self.acknowledged_bitrate_estimator.bitrate(),
                     self.probe_bitrate_estimator
                         .fetch_and_reset_last_estimated_bitrate(),
+                    None,
                     /*in_alr*/ false,
                 );
             if result.updated {
@@ -1348,5 +1358,57 @@ mod test {
             assert!(last_bitrate <= bwe.bitrate_observer.latest_bitrate());
             last_bitrate = bwe.bitrate_observer.latest_bitrate();
         }
+    }
+
+    /// Feeds 60 packets, sent 10ms apart, whose delay grows by 2ms each, one
+    /// per feedback. Returns whether the delay detector reported overuse.
+    fn detects_overuse_on_growing_delay(
+        trendline_estimator_settings: TrendlineEstimatorSettings,
+    ) -> bool {
+        let mut bwe = DelayBasedBwe::new(&FieldTrials {
+            trendline_estimator_settings,
+            ..Default::default()
+        });
+        let start = Timestamp::from_seconds(100);
+        (0..60).any(|i| {
+            let send_time = start + TimeDelta::from_millis(10 * i);
+            let receive_time = send_time + TimeDelta::from_millis(2 * i);
+            let msg = TransportPacketsFeedback {
+                feedback_time: receive_time,
+                packet_feedbacks: vec![PacketResult {
+                    sent_packet: SentPacket {
+                        send_time,
+                        size: DataSize::from_bytes(MTU as _),
+                        sequence_number: i,
+                        ..Default::default()
+                    },
+                    receive_time,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            bwe.incoming_packet_feedback_vector(&msg, None, None, None, false)
+                .delay_detector_state
+                == BandwidthUsage::Overusing
+        })
+    }
+
+    /// The delay detectors keep the configured trendline settings when the
+    /// first feedback resets them.
+    ///
+    /// A trendline estimator fits a trend only once its window is full. With
+    /// the default window of 20 packets, the growing delay shows as overuse
+    /// within 60 packets, and with a window of 100 packets it does not.
+    #[test]
+    fn delay_detectors_keep_trendline_settings_on_reset() {
+        assert!(detects_overuse_on_growing_delay(
+            TrendlineEstimatorSettings::default()
+        ));
+        assert!(!detects_overuse_on_growing_delay(
+            TrendlineEstimatorSettings {
+                window_size: 100,
+                ..Default::default()
+            }
+        ));
     }
 } // namespace webrtc

@@ -281,21 +281,27 @@ impl Default for PacketResult {
     }
 }
 
-impl PartialOrd for PacketResult {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+/// libwebrtc's `PacketResult::ReceiveTimeOrder`: by receive time, then send
+/// time, then sequence number.
+impl Ord for PacketResult {
+    fn cmp(&self, other: &Self) -> Ordering {
         if self.receive_time != other.receive_time {
-            return Some(self.receive_time.cmp(&other.receive_time));
+            return self.receive_time.cmp(&other.receive_time);
         }
 
         if self.sent_packet.send_time != other.sent_packet.send_time {
-            return Some(self.sent_packet.send_time.cmp(&other.sent_packet.send_time));
+            return self.sent_packet.send_time.cmp(&other.sent_packet.send_time);
         }
 
-        Some(
-            self.sent_packet
-                .sequence_number
-                .cmp(&other.sent_packet.sequence_number),
-        )
+        self.sent_packet
+            .sequence_number
+            .cmp(&other.sent_packet.sequence_number)
+    }
+}
+
+impl PartialOrd for PacketResult {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -306,6 +312,8 @@ impl PartialEq for PacketResult {
             && self.sent_packet.sequence_number == other.sent_packet.sequence_number
     }
 }
+
+impl Eq for PacketResult {}
 
 #[derive(Debug, Clone)]
 pub struct TransportPacketsFeedback {
@@ -344,7 +352,7 @@ impl TransportPacketsFeedback {
 
     pub fn sorted_by_receive_time(&self) -> Vec<PacketResult> {
         let mut res: Vec<PacketResult> = self.received_with_send_info().cloned().collect();
-        res.sort_by_key(|a| a.receive_time);
+        res.sort_unstable();
         res
     }
 }
@@ -565,5 +573,44 @@ impl Default for NetworkStateEstimate {
             link_capacity_min: DataRate::minus_infinity(),
             cross_traffic_ratio: f64::NAN,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn packet_result(receive_ms: i64, send_ms: i64, sequence_number: i64) -> PacketResult {
+        PacketResult {
+            sent_packet: SentPacket {
+                send_time: Timestamp::from_millis(send_ms),
+                sequence_number,
+                ..Default::default()
+            },
+            receive_time: Timestamp::from_millis(receive_ms),
+            ..Default::default()
+        }
+    }
+
+    /// Packets received at the same time are sorted by send time, then by
+    /// sequence number.
+    #[test]
+    fn sorted_by_receive_time_breaks_ties_by_send_time_then_sequence_number() {
+        let feedback = TransportPacketsFeedback {
+            packet_feedbacks: vec![
+                packet_result(10, 5, 3),
+                packet_result(10, 4, 2),
+                packet_result(10, 4, 1),
+                packet_result(5, 6, 4),
+            ],
+            ..Default::default()
+        };
+
+        let sequence_numbers: Vec<i64> = feedback
+            .sorted_by_receive_time()
+            .iter()
+            .map(|packet| packet.sent_packet.sequence_number)
+            .collect();
+        assert_eq!(sequence_numbers, vec![4, 1, 2, 3]);
     }
 }

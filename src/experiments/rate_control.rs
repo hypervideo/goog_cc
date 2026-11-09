@@ -13,7 +13,12 @@ use crate::{api::units::DataSize, experiments::FieldTrials};
 /// WebRTC-CongestionWindow
 #[derive(Clone, Debug)]
 pub struct CongestionWindowConfig {
-    pub queue_size_ms: i64,                    // QueueSize
+    /// The queuing time that the congestion window allows on top of the RTT.
+    ///
+    /// The window is the data that the target rate sends in the RTT plus this
+    /// time. Without a queue size, the controller keeps no congestion window,
+    /// and zero gives one of the RTT alone.
+    pub queue_size_ms: Option<i64>, // QueueSize
     pub min_bitrate_bps: i64,                  // MinBitrate
     pub initial_data_window: Option<DataSize>, // InitWin
     pub drop_frame_only: bool,                 // DropFrame
@@ -23,7 +28,7 @@ impl Default for CongestionWindowConfig {
     // QueueSize:350,MinBitrate:30000,DropFrame:true
     fn default() -> Self {
         Self {
-            queue_size_ms: 350,
+            queue_size_ms: Some(RateControlSettings::DEFAULT_ACCEPTED_QUEUE_MS),
             min_bitrate_bps: 30000,
             initial_data_window: None,
             drop_frame_only: true,
@@ -70,6 +75,8 @@ pub struct RateControlSettings {
 }
 
 impl RateControlSettings {
+    const DEFAULT_ACCEPTED_QUEUE_MS: i64 = 350;
+
     // const char kCongestionWindowDefaultFieldTrialString[] =
     //"QueueSize:350,MinBitrate:30000,DropFrame:true";
     //const char kUseBaseHeavyVp8Tl3RateAllocationFieldTrialName[] =
@@ -90,15 +97,17 @@ impl RateControlSettings {
     /// the congestion window. The relation between outstanding data and
     /// the congestion window affects encoder allocations directly.
     pub fn use_congestion_window(&self) -> bool {
-        self.congestion_window_config.queue_size_ms > 0
+        self.congestion_window_config.queue_size_ms.is_some()
     }
 
     pub fn get_congestion_window_additional_time_ms(&self) -> i64 {
-        self.congestion_window_config.queue_size_ms
+        self.congestion_window_config
+            .queue_size_ms
+            .unwrap_or(Self::DEFAULT_ACCEPTED_QUEUE_MS)
     }
 
     pub fn use_congestion_window_pushback(&self) -> bool {
-        self.congestion_window_config.queue_size_ms > 0
+        self.congestion_window_config.queue_size_ms.is_some()
             && self.congestion_window_config.min_bitrate_bps > 0
     }
 
@@ -164,5 +173,39 @@ impl RateControlSettings {
     }
     pub fn bitrate_adjuster_can_use_network_headroom(&self) -> bool {
         self.video_config.adjuster_use_headroom
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn settings_with_queue_size(queue_size_ms: Option<i64>) -> RateControlSettings {
+        RateControlSettings::new(&FieldTrials {
+            congestion_window: CongestionWindowConfig {
+                queue_size_ms,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    }
+
+    /// A queue size of zero still gives a congestion window, with pushback.
+    #[test]
+    fn zero_queue_size_gives_congestion_window() {
+        let settings = settings_with_queue_size(Some(0));
+
+        assert!(settings.use_congestion_window());
+        assert_eq!(settings.get_congestion_window_additional_time_ms(), 0);
+        assert!(settings.use_congestion_window_pushback());
+    }
+
+    /// Without a queue size, there is no congestion window.
+    #[test]
+    fn absent_queue_size_gives_no_congestion_window() {
+        let settings = settings_with_queue_size(None);
+
+        assert!(!settings.use_congestion_window());
+        assert!(!settings.use_congestion_window_pushback());
     }
 }

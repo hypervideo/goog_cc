@@ -71,7 +71,7 @@ impl LinkCapacityEstimator {
     }
 
     fn update(&mut self, capacity_sample: DataRate, alpha: f64) {
-        let sample_kbps: f64 = capacity_sample.kbps_float();
+        let sample_kbps: f64 = capacity_sample.kbps() as f64;
         let estimate_kbps = if let Some(estimate_kbps) = self.estimate_kbps {
             (1.0 - alpha) * estimate_kbps + alpha * sample_kbps
         } else {
@@ -95,5 +95,19 @@ impl LinkCapacityEstimator {
         // variance and the current throughput bitrate. The standard deviation will
         // only be used if self.estimate_kbps has a value.
         (self.deviation_kbps * estimate_kbps).sqrt()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// A capacity sample counts in whole kbps, rounded to the nearest.
+    #[test]
+    fn sample_rounds_to_whole_kbps() {
+        let mut estimator = LinkCapacityEstimator::new();
+        estimator.on_overuse_detected(DataRate::from_bits_per_sec(500_400));
+
+        assert_eq!(estimator.estimate(), DataRate::from_kilobits_per_sec(500));
     }
 }
