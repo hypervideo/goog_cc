@@ -162,14 +162,14 @@ impl AimdRateControl {
     }
 
     pub fn set_start_bitrate(&mut self, start_bitrate: DataRate) {
-        self.current_bitrate = self.clamp_bitrate(start_bitrate);
+        self.current_bitrate = start_bitrate;
         self.latest_estimated_throughput = self.current_bitrate;
         self.bitrate_is_initialized = true;
     }
 
     pub fn set_min_bitrate(&mut self, min_bitrate: DataRate) {
-        self.min_configured_bitrate = min_bitrate.max(CONGESTION_CONTROLLER_MIN_BITRATE);
-        self.current_bitrate = self.current_bitrate.max(self.min_configured_bitrate);
+        self.min_configured_bitrate = min_bitrate;
+        self.current_bitrate = self.current_bitrate.max(min_bitrate);
     }
 
     /* unused
@@ -828,15 +828,25 @@ mod test {
         assert!(aimd_rate_control.latest_estimate() > network_estimate.link_capacity_upper);
     }
 
+    /// The start and minimum bitrates apply as given.
+    ///
+    /// A start bitrate below the minimum stays, and a minimum below
+    /// `CONGESTION_CONTROLLER_MIN_BITRATE` bounds later estimates.
     #[test]
-    fn zero_start_bitrate_is_clamped_to_minimum() {
+    fn start_and_min_bitrates_apply_as_given() {
         let mut aimd_rate_control = AimdRateControl::default();
-        aimd_rate_control.set_min_bitrate(DataRate::zero());
-        aimd_rate_control.set_start_bitrate(DataRate::zero());
-
+        aimd_rate_control.set_min_bitrate(DataRate::from_kilobits_per_sec(10));
+        aimd_rate_control.set_start_bitrate(DataRate::from_kilobits_per_sec(8));
         assert_eq!(
             aimd_rate_control.latest_estimate(),
-            CONGESTION_CONTROLLER_MIN_BITRATE
+            DataRate::from_kilobits_per_sec(8)
+        );
+
+        aimd_rate_control.set_min_bitrate(DataRate::from_kilobits_per_sec(1));
+        aimd_rate_control.set_estimate(DataRate::from_kilobits_per_sec(2), INITIAL_TIME);
+        assert_eq!(
+            aimd_rate_control.latest_estimate(),
+            DataRate::from_kilobits_per_sec(2)
         );
     }
 
