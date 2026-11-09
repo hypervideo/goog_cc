@@ -142,7 +142,7 @@ impl GoogCcNetworkController {
             limit_pacingfactor_by_upper_link_capacity_estimate: field_trials
                 .limit_pacing_factor_by_upper_link_capacity_estimate,
 
-            probe_controller: ProbeController::new(field_trials.probing_configuration.clone()),
+            probe_controller: ProbeController::from_field_trials(&field_trials),
             congestion_window_pushback_controller: rate_control_settings
                 .use_congestion_window_pushback()
                 .then(|| CongestionWindowPushbackController::new(&field_trials)),

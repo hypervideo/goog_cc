@@ -8,9 +8,12 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
-use crate::api::{
-    transport::{NetworkAvailability, NetworkStateEstimate, ProbeClusterConfig},
-    units::{DataRate, TimeDelta, Timestamp},
+use crate::{
+    api::{
+        transport::{NetworkAvailability, NetworkStateEstimate, ProbeClusterConfig},
+        units::{DataRate, TimeDelta, Timestamp},
+    },
+    experiments::FieldTrials,
 };
 
 // NOTE: These have been renamed to match the field trials.
@@ -224,6 +227,15 @@ impl ProbeController {
         Self {
             config,
             ..Default::default()
+        }
+    }
+
+    /// Creates a controller with the probing configuration and the rapid
+    /// recovery experiment of `field_trials`.
+    pub fn from_field_trials(field_trials: &FieldTrials) -> Self {
+        Self {
+            in_rapid_recovery_experiment: field_trials.rapid_recovery_experiment,
+            ..Self::new(field_trials.probing_configuration.clone())
         }
     }
 
@@ -1480,6 +1492,45 @@ mod test {
         clock += ALR_ENDED_TIMEOUT + TimeDelta::from_millis(1);
         let probes = probe_controller.request_probe(clock);
         assert!(probes.is_empty());
+    }
+
+    /// With `WebRTC-BweRapidRecoveryExperiment`, a large drop gets a probe
+    /// outside ALR too.
+    ///
+    /// The estimate drops from 500bps to 250bps, so the probe goes out at
+    /// 85% of 500bps.
+    #[test]
+    fn rapid_recovery_requests_probe_outside_alr() {
+        let mut clock = Timestamp::zero();
+        let mut probe_controller = ProbeController::from_field_trials(&FieldTrials {
+            rapid_recovery_experiment: true,
+            ..Default::default()
+        });
+        assert!(probe_controller
+            .on_network_availability(NetworkAvailability {
+                network_available: true,
+                ..Default::default()
+            })
+            .is_empty());
+        let probes = probe_controller.set_bitrates(MIN_BITRATE, START_BITRATE, MAX_BITRATE, clock);
+        assert_eq!(probes.len(), 2);
+        probe_controller.set_estimated_bitrate(
+            DataRate::from_bits_per_sec(500),
+            BandwidthLimitedCause::DelayBasedLimited,
+            clock,
+        );
+
+        probe_controller.set_alr_start_time(None);
+        clock += ALR_PROBE_INTERVAL + TimeDelta::from_millis(1);
+        probe_controller.process(clock);
+        probe_controller.set_estimated_bitrate(
+            DataRate::from_bits_per_sec(250),
+            BandwidthLimitedCause::DelayBasedLimited,
+            clock,
+        );
+        let probes = probe_controller.request_probe(clock);
+        assert_eq!(probes.len(), 1);
+        assert_eq!(probes[0].target_data_rate, DataRate::from_bits_per_sec(425));
     }
 
     #[test]
