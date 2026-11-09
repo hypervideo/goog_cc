@@ -33,19 +33,10 @@ use super::{
     ProbeBitrateEstimator, ProbeClusterObservation, ProbeController, SendSideBandwidthEstimation,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SafeResetOnRouteChange {
     pub enabled: bool, // Enabled
     pub ack: bool,     // ack
-}
-
-impl Default for SafeResetOnRouteChange {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            ack: true,
-        }
-    }
 }
 
 /// Google Congestion Control specific configuration.
@@ -2220,5 +2211,61 @@ mod test {
         }
 
         assert_eq!(probe_times, vec![start + TimeDelta::from_seconds(11)]);
+    }
+
+    /// Runs a controller with `field_trials` until it has an acknowledged
+    /// bitrate of about 160kbps, then changes the route with a starting rate
+    /// of 300kbps.
+    ///
+    /// Returns the acknowledged bitrate before the route change and the target
+    /// rate after it.
+    fn route_change_after_acknowledged_rate(field_trials: FieldTrials) -> (DataRate, DataRate) {
+        let mut controller = create_controller(field_trials);
+        let mut current_time = Timestamp::from_millis(123);
+        controller.on_network_availability(NetworkAvailability {
+            at_time: current_time,
+            network_available: true,
+        });
+        packet_transmission_and_feedback_block(&mut controller, 6000, 0, &mut current_time);
+        let acknowledged_bitrate = controller.acknowledged_bitrate().unwrap();
+
+        let update = controller.on_network_route_change(create_route_change(
+            current_time,
+            Some(DataRate::from_kilobits_per_sec(300)),
+            None,
+            None,
+        ));
+        (
+            acknowledged_bitrate,
+            update.target_rate.unwrap().target_rate,
+        )
+    }
+
+    /// A route change starts at its own starting rate by default, as
+    /// `WebRTC-Bwe-SafeResetOnRouteChange` is off.
+    #[test]
+    fn route_change_keeps_starting_rate_by_default() {
+        let (acknowledged_bitrate, target_rate) =
+            route_change_after_acknowledged_rate(FieldTrials::default());
+
+        assert!(acknowledged_bitrate < DataRate::from_kilobits_per_sec(300));
+        assert_eq!(target_rate, DataRate::from_kilobits_per_sec(300));
+    }
+
+    /// With `WebRTC-Bwe-SafeResetOnRouteChange/Enabled,ack/`, a route change
+    /// starts at most at the acknowledged bitrate.
+    #[test]
+    fn safe_reset_caps_starting_rate_at_acknowledged_bitrate() {
+        let (acknowledged_bitrate, target_rate) =
+            route_change_after_acknowledged_rate(FieldTrials {
+                safe_reset_on_route_change: SafeResetOnRouteChange {
+                    enabled: true,
+                    ack: true,
+                },
+                ..Default::default()
+            });
+
+        assert!(acknowledged_bitrate < DataRate::from_kilobits_per_sec(300));
+        assert_eq!(target_rate, acknowledged_bitrate);
     }
 }
