@@ -715,7 +715,8 @@ impl ProbeController {
 
         match self.network_estimate {
             Some(network_estimate)
-                if network_estimate.link_capacity_upper.is_finite()
+                if self.config.network_state_interval.is_finite()
+                    && network_estimate.link_capacity_upper.is_finite()
                     && network_estimate.link_capacity_upper >= bitrate =>
             {
                 config.target_duration = self.config.network_state_probe_duration;
@@ -1996,6 +1997,43 @@ mod test {
         let probes = probe_controller.process(clock);
         assert_eq!(probes.len(), 1);
         assert_eq!(probes[0].target_duration, TimeDelta::from_millis(100));
+    }
+
+    /// The network state probe duration applies only with a finite
+    /// `network_state_interval`.
+    ///
+    /// The probe of 10kbps is below the network state estimate of 20kbps, but
+    /// without network state probing it keeps the minimum probe duration.
+    #[test]
+    fn network_state_probe_duration_needs_network_state_interval() {
+        let clock = Timestamp::zero();
+        let mut probe_controller = ProbeController::new(ProbeControllerConfig {
+            network_state_probe_duration: TimeDelta::from_millis(100),
+            ..Default::default()
+        });
+        assert!(probe_controller
+            .on_network_availability(NetworkAvailability {
+                network_available: true,
+                ..Default::default()
+            })
+            .is_empty());
+
+        probe_controller.set_bitrates(MIN_BITRATE, START_BITRATE, MAX_BITRATE, clock);
+        probe_controller.set_network_state_estimate(NetworkStateEstimate {
+            link_capacity_upper: DataRate::from_kilobits_per_sec(20),
+            ..Default::default()
+        });
+        let probes = probe_controller.set_estimated_bitrate(
+            DataRate::from_kilobits_per_sec(5),
+            BandwidthLimitedCause::DelayBasedLimited,
+            clock,
+        );
+        assert_eq!(probes.len(), 1);
+        assert_eq!(
+            probes[0].target_data_rate,
+            DataRate::from_kilobits_per_sec(10)
+        );
+        assert_eq!(probes[0].target_duration, TimeDelta::from_millis(15));
     }
 
     #[test]
