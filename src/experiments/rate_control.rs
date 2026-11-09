@@ -19,7 +19,13 @@ pub struct CongestionWindowConfig {
     /// time. Without a queue size, the controller keeps no congestion window,
     /// and zero gives one of the RTT alone.
     pub queue_size_ms: Option<i64>, // QueueSize
-    pub min_bitrate_bps: i64,                  // MinBitrate
+    /// The lowest target bitrate that congestion window pushback reduces the
+    /// encoder target to.
+    ///
+    /// Pushback leaves a target that is already lower as it is. Zero gives
+    /// pushback without a floor. Without a value, the controller does no
+    /// pushback and passes the congestion window to the pacer instead.
+    pub min_bitrate_bps: Option<i64>, // MinBitrate
     pub initial_data_window: Option<DataSize>, // InitWin
     pub drop_frame_only: bool,                 // DropFrame
 }
@@ -29,7 +35,7 @@ impl Default for CongestionWindowConfig {
     fn default() -> Self {
         Self {
             queue_size_ms: Some(RateControlSettings::DEFAULT_ACCEPTED_QUEUE_MS),
-            min_bitrate_bps: 30000,
+            min_bitrate_bps: Some(RateControlSettings::DEFAULT_MIN_PUSHBACK_TARGET_BITRATE_BPS),
             initial_data_window: None,
             drop_frame_only: true,
         }
@@ -76,6 +82,7 @@ pub struct RateControlSettings {
 
 impl RateControlSettings {
     const DEFAULT_ACCEPTED_QUEUE_MS: i64 = 350;
+    const DEFAULT_MIN_PUSHBACK_TARGET_BITRATE_BPS: i64 = 30000;
 
     // const char kCongestionWindowDefaultFieldTrialString[] =
     //"QueueSize:350,MinBitrate:30000,DropFrame:true";
@@ -108,7 +115,7 @@ impl RateControlSettings {
 
     pub fn use_congestion_window_pushback(&self) -> bool {
         self.congestion_window_config.queue_size_ms.is_some()
-            && self.congestion_window_config.min_bitrate_bps > 0
+            && self.congestion_window_config.min_bitrate_bps.is_some()
     }
 
     pub fn use_congestion_window_drop_frame_only(&self) -> bool {
@@ -116,7 +123,9 @@ impl RateControlSettings {
     }
 
     pub fn congestion_window_min_pushback_target_bitrate_bps(&self) -> u32 {
-        self.congestion_window_config.min_bitrate_bps as _
+        self.congestion_window_config
+            .min_bitrate_bps
+            .unwrap_or(Self::DEFAULT_MIN_PUSHBACK_TARGET_BITRATE_BPS) as _
     }
 
     pub fn congestion_window_initial_data_window(&self) -> Option<DataSize> {
@@ -207,5 +216,41 @@ mod test {
 
         assert!(!settings.use_congestion_window());
         assert!(!settings.use_congestion_window_pushback());
+    }
+
+    fn settings_with_min_bitrate(min_bitrate_bps: Option<i64>) -> RateControlSettings {
+        RateControlSettings::new(&FieldTrials {
+            congestion_window: CongestionWindowConfig {
+                min_bitrate_bps,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    }
+
+    /// A minimum pushback bitrate of zero still gives pushback, without a floor.
+    #[test]
+    fn zero_min_bitrate_gives_pushback() {
+        let settings = settings_with_min_bitrate(Some(0));
+
+        assert!(settings.use_congestion_window_pushback());
+        assert_eq!(
+            settings.congestion_window_min_pushback_target_bitrate_bps(),
+            0
+        );
+    }
+
+    /// Without a minimum pushback bitrate, the congestion window stays, but
+    /// there is no pushback.
+    #[test]
+    fn absent_min_bitrate_gives_no_pushback() {
+        let settings = settings_with_min_bitrate(None);
+
+        assert!(settings.use_congestion_window());
+        assert!(!settings.use_congestion_window_pushback());
+        assert_eq!(
+            settings.congestion_window_min_pushback_target_bitrate_bps(),
+            30000
+        );
     }
 }
