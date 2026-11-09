@@ -10,7 +10,7 @@
 
 use crate::{
     api::{
-        transport::{BandwidthUsage, PacketResult, TransportPacketsFeedback},
+        transport::{BandwidthUsage, NetworkStateEstimate, PacketResult, TransportPacketsFeedback},
         units::{DataRate, DataSize, TimeDelta, Timestamp},
     },
     experiments::FieldTrials,
@@ -135,7 +135,7 @@ impl DelayBasedBwe {
         msg: &TransportPacketsFeedback,
         acked_bitrate: Option<DataRate>,
         probe_bitrate: Option<DataRate>,
-        //network_estimate: Option<NetworkStateEstimate>,
+        network_estimate: Option<NetworkStateEstimate>,
         in_alr: bool,
     ) -> DelayBasedBweResult {
         let packet_feedback_vector = msg.sorted_by_receive_time();
@@ -170,7 +170,8 @@ impl DelayBasedBwe {
             return DelayBasedBweResult::default();
         }
         self.rate_control.set_in_application_limited_region(in_alr);
-        //self.rate_control.SetNetworkStateEstimate(network_estimate);
+        self.rate_control
+            .set_network_state_estimate(network_estimate);
         self.maybe_update_estimate(
             acked_bitrate,
             probe_bitrate,
@@ -668,6 +669,7 @@ mod test {
                 self.acknowledged_bitrate_estimator.bitrate(),
                 self.probe_bitrate_estimator
                     .fetch_and_reset_last_estimated_bitrate(),
+                None,
                 /*in_alr*/ false,
             );
             if result.updated {
@@ -722,6 +724,7 @@ mod test {
                     self.acknowledged_bitrate_estimator.bitrate(),
                     self.probe_bitrate_estimator
                         .fetch_and_reset_last_estimated_bitrate(),
+                    None,
                     /*in_alr*/ false,
                 );
             if result.updated {

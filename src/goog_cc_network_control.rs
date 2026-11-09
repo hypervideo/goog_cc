@@ -802,7 +802,8 @@ impl NetworkControllerInterface for GoogCcNetworkController {
         let result: DelayBasedBweResult = self.delay_based_bwe.incoming_packet_feedback_vector(
             &report,
             acknowledged_bitrate,
-            probe_bitrate, /*self.estimate,*/
+            probe_bitrate,
+            self.estimate,
             alr_start_time.is_some(),
         );
 
@@ -2267,5 +2268,35 @@ mod test {
 
         assert!(acknowledged_bitrate < DataRate::from_kilobits_per_sec(300));
         assert_eq!(target_rate, acknowledged_bitrate);
+    }
+
+    /// The upper link capacity of a network state estimate bounds the
+    /// delay-based estimate's increase.
+    ///
+    /// Without the bound, 6s of feedback without delay raise the target from
+    /// 60kbps to well above 100kbps.
+    #[test]
+    fn network_state_estimate_bounds_delay_based_increase() {
+        let mut controller = create_controller(FieldTrials::default());
+        let mut current_time = Timestamp::from_millis(123);
+        controller.on_network_availability(NetworkAvailability {
+            at_time: current_time,
+            network_available: true,
+        });
+        let link_capacity_upper = DataRate::from_kilobits_per_sec(100);
+        controller.on_network_state_estimate(NetworkStateEstimate {
+            update_time: current_time,
+            link_capacity_upper,
+            ..Default::default()
+        });
+
+        let target_bitrate =
+            packet_transmission_and_feedback_block(&mut controller, 6000, 0, &mut current_time);
+
+        assert_eq!(
+            controller.delay_based_bwe.last_estimate(),
+            link_capacity_upper
+        );
+        assert!(target_bitrate.unwrap() <= link_capacity_upper);
     }
 }

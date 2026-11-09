@@ -259,7 +259,6 @@ impl AimdRateControl {
         }
     }
 
-    #[cfg(test)]
     pub fn set_network_state_estimate(&mut self, estimate: Option<NetworkStateEstimate>) {
         self.network_estimate = estimate;
     }
