@@ -75,21 +75,24 @@ macro_rules! unit_base {
                 self.divide_round_to_nearest(denominator)
             }
 
+            // libwebrtc's `DivideRoundToNearest`, which rounds a tie up, so
+            // -1.5 rounds to -1.
             const fn divide_round_to_nearest(&self, d: i64) -> i64 {
-                debug_assert!(d >= 0);
+                debug_assert!(d > 0);
 
                 let v = self.to_value();
-                let mut result = v / d;
+                let quotient = v / d;
                 let remainder = v % d;
-
-                if remainder.abs() * 2 >= d.abs() {
-                    if (v < 0) != (d < 0) {
-                        result -= 1
-                    } else {
-                        result += 1
+                if v < 0 {
+                    if -remainder > d / 2 {
+                        return quotient - 1;
                     }
+                    return quotient;
                 }
-                result
+                if remainder > (d - 1) / 2 {
+                    return quotient + 1;
+                }
+                quotient
             }
 
             #[allow(dead_code)]
@@ -589,6 +592,53 @@ mod test {
         const VALUE: i64 = 3000000;
         assert_eq!(TestUnit::from_value(VALUE).to_kilo(), VALUE / 1000);
         assert_eq!(TestUnit::from_kilo(VALUE).to_value(), VALUE * 1000);
+    }
+
+    fn divide_round_to_nearest(dividend: i64, divisor: i64) -> i64 {
+        TestUnit::from_value(dividend).divide_round_to_nearest(divisor)
+    }
+
+    #[test]
+    fn divide_round_to_nearest_by_odd_number() {
+        assert_eq!(divide_round_to_nearest(-5, 3), -2);
+        assert_eq!(divide_round_to_nearest(-4, 3), -1);
+        assert_eq!(divide_round_to_nearest(-3, 3), -1);
+        assert_eq!(divide_round_to_nearest(-2, 3), -1);
+        assert_eq!(divide_round_to_nearest(-1, 3), 0);
+        assert_eq!(divide_round_to_nearest(0, 3), 0);
+        assert_eq!(divide_round_to_nearest(1, 3), 0);
+        assert_eq!(divide_round_to_nearest(2, 3), 1);
+        assert_eq!(divide_round_to_nearest(3, 3), 1);
+        assert_eq!(divide_round_to_nearest(4, 3), 1);
+        assert_eq!(divide_round_to_nearest(5, 3), 2);
+        assert_eq!(divide_round_to_nearest(6, 3), 2);
+    }
+
+    #[test]
+    fn divide_round_to_nearest_by_even_number_tie_rounds_up() {
+        assert_eq!(divide_round_to_nearest(-7, 4), -2);
+        assert_eq!(divide_round_to_nearest(-6, 4), -1);
+        assert_eq!(divide_round_to_nearest(-5, 4), -1);
+        assert_eq!(divide_round_to_nearest(-4, 4), -1);
+        assert_eq!(divide_round_to_nearest(-3, 4), -1);
+        assert_eq!(divide_round_to_nearest(-2, 4), 0);
+        assert_eq!(divide_round_to_nearest(-1, 4), 0);
+        assert_eq!(divide_round_to_nearest(0, 4), 0);
+        assert_eq!(divide_round_to_nearest(1, 4), 0);
+        assert_eq!(divide_round_to_nearest(2, 4), 1);
+        assert_eq!(divide_round_to_nearest(3, 4), 1);
+        assert_eq!(divide_round_to_nearest(4, 4), 1);
+        assert_eq!(divide_round_to_nearest(5, 4), 1);
+        assert_eq!(divide_round_to_nearest(6, 4), 2);
+        assert_eq!(divide_round_to_nearest(7, 4), 2);
+    }
+
+    #[test]
+    fn divide_round_to_nearest_by_large_divisor() {
+        let max = i32::MAX as i64;
+        let min = i32::MIN as i64;
+        assert_eq!(divide_round_to_nearest(max - 1, max), 1);
+        assert_eq!(divide_round_to_nearest(min, max), -1);
     }
 
     #[test]
