@@ -8,9 +8,15 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
+use std::sync::Arc;
+
 use crate::experiments::FieldTrials;
 
-use super::{transport::*, units::TimeDelta};
+use super::{
+    rtc_event_log::{RtcEventLog, RtcEventLogNull},
+    transport::*,
+    units::TimeDelta,
+};
 
 /*
 pub trait TargetTransferRateObserver {
@@ -28,6 +34,9 @@ pub trait TargetTransferRateObserver {
 #[derive(Debug, Clone)]
 pub struct NetworkControllerConfig {
     pub field_trials: FieldTrials,
+    /// The log that the controller's components write their events to, the
+    /// event log of libwebrtc's `Environment`. Defaults to [`RtcEventLogNull`].
+    pub event_log: Arc<dyn RtcEventLog>,
 
     /// The initial constraints to start with, these can be changed at any later
     /// time by calls to OnTargetRateConstraints. Note that the starting rate
@@ -47,6 +56,7 @@ impl Default for NetworkControllerConfig {
     fn default() -> Self {
         Self {
             field_trials: FieldTrials::default(),
+            event_log: Arc::new(RtcEventLogNull),
             constraints: TargetRateConstraints::default(),
             stream_based_config: StreamsConfig::default(),
             default_pacing_time_window: PacerConfig::DEFAULT_TIME_INTERVAL,

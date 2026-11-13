@@ -8,11 +8,12 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 use crate::{
     api::{
         network_control::{NetworkControllerConfig, NetworkControllerInterface},
+        rtc_event_log::{RtcEvent, RtcEventLog, RtcEventRemoteEstimate},
         transport::{
             BandwidthUsage, NetworkAvailability, NetworkControlUpdate, NetworkEstimate,
             NetworkRouteChange, NetworkStateEstimate, PacedPacketInfo, PacerConfig,
@@ -56,6 +57,7 @@ pub struct GoogCcConfig {
 /// Use the [NetworkControllerInterface] to interact with this controller.
 pub struct GoogCcNetworkController {
     field_trials: FieldTrials,
+    event_log: Arc<dyn RtcEventLog>,
 
     safe_reset_on_route_change: bool,
     safe_reset_acknowledged_rate: bool,
@@ -125,10 +127,11 @@ impl GoogCcNetworkController {
 
     pub fn new(config: NetworkControllerConfig, _goog_cc_config: GoogCcConfig) -> Self {
         let field_trials = config.field_trials.clone();
+        let event_log = config.event_log.clone();
         let rate_control_settings = RateControlSettings::new(&field_trials);
 
         debug_assert!(config.constraints.at_time.is_finite());
-        let mut delay_based_bwe = DelayBasedBwe::new(&field_trials);
+        let mut delay_based_bwe = DelayBasedBwe::new(&field_trials, event_log.clone());
         delay_based_bwe.set_min_bitrate(CONGESTION_CONTROLLER_MIN_BITRATE);
 
         Self {
@@ -142,14 +145,20 @@ impl GoogCcNetworkController {
             limit_pacingfactor_by_upper_link_capacity_estimate: field_trials
                 .limit_pacing_factor_by_upper_link_capacity_estimate,
 
-            probe_controller: ProbeController::from_field_trials(&field_trials),
+            probe_controller: ProbeController::from_field_trials(&field_trials, event_log.clone()),
             congestion_window_pushback_controller: rate_control_settings
                 .use_congestion_window_pushback()
                 .then(|| CongestionWindowPushbackController::new(&field_trials)),
             rate_control_settings,
-            bandwidth_estimation: SendSideBandwidthEstimation::new(field_trials.clone()),
-            alr_detector: AlrDetector::new(field_trials.alr_detector_parameters.clone()),
-            probe_bitrate_estimator: ProbeBitrateEstimator::default(),
+            bandwidth_estimation: SendSideBandwidthEstimation::new(
+                field_trials.clone(),
+                event_log.clone(),
+            ),
+            alr_detector: AlrDetector::new(
+                field_trials.alr_detector_parameters.clone(),
+                event_log.clone(),
+            ),
+            probe_bitrate_estimator: ProbeBitrateEstimator::new(event_log.clone()),
             delay_based_bwe,
             acknowledged_bitrate_estimator: AcknowledgedBitrateEstimator::create(&field_trials),
 
@@ -183,6 +192,7 @@ impl GoogCcNetworkController {
 
             initial_config: Some(config),
             field_trials,
+            event_log,
         }
     }
 
@@ -431,7 +441,14 @@ impl GoogCcNetworkController {
         match (self.estimate, prev_estimate) {
             (Some(estimate), Some(prev_estimate))
                 if estimate.update_time == prev_estimate.update_time => {}
-            (Some(estimate), _) => self.probe_controller.set_network_state_estimate(estimate),
+            (Some(estimate), _) => {
+                self.event_log
+                    .log(RtcEvent::RemoteEstimate(RtcEventRemoteEstimate {
+                        link_capacity_lower: estimate.link_capacity_lower,
+                        link_capacity_upper: estimate.link_capacity_upper,
+                    }));
+                self.probe_controller.set_network_state_estimate(estimate)
+            }
             _ => {}
         };
     }
@@ -486,8 +503,8 @@ impl NetworkControllerInterface for GoogCcNetworkController {
 
         self.acknowledged_bitrate_estimator =
             AcknowledgedBitrateEstimator::create(&self.field_trials);
-        self.probe_bitrate_estimator = ProbeBitrateEstimator::default();
-        self.delay_based_bwe = DelayBasedBwe::new(&self.field_trials);
+        self.probe_bitrate_estimator = ProbeBitrateEstimator::new(self.event_log.clone());
+        self.delay_based_bwe = DelayBasedBwe::new(&self.field_trials, self.event_log.clone());
         self.bandwidth_estimation.on_route_change();
         self.probe_controller.reset(msg.at_time);
         let mut update = NetworkControlUpdate {
@@ -898,7 +915,7 @@ fn get_bandwidth_limited_cause(
 mod test {
     use test_trace::test;
 
-    use crate::api::transport::PacketResult;
+    use crate::api::{rtc_event_log::test::RecordingRtcEventLog, transport::PacketResult};
 
     use super::*;
 
@@ -2298,5 +2315,87 @@ mod test {
             link_capacity_upper
         );
         assert!(target_bitrate.unwrap() <= link_capacity_upper);
+    }
+
+    /// A controller that logs to `event_log`, with the constraints of
+    /// [`create_controller`].
+    fn create_controller_with_event_log(
+        event_log: Arc<RecordingRtcEventLog>,
+    ) -> GoogCcNetworkController {
+        let config = NetworkControllerConfig {
+            event_log,
+            constraints: TargetRateConstraints {
+                at_time: Timestamp::zero(),
+                min_data_rate: Some(DataRate::from_kilobits_per_sec(0)),
+                max_data_rate: Some(DataRate::from_kilobits_per_sec(5 * INITIAL_BITRATE_KBPS)),
+                starting_rate: Some(DataRate::from_kilobits_per_sec(INITIAL_BITRATE_KBPS)),
+            },
+            ..Default::default()
+        };
+        GoogCcNetworkController::new(config, GoogCcConfig::default())
+    }
+
+    /// The controller logs a network state estimate whose update time is new,
+    /// as libwebrtc's `SetNetworkStateEstimate` does
+    /// ([`goog_cc_network_control.cc#562`](https://webrtc.googlesource.com/src/+/3075edeba1/modules/congestion_controller/goog_cc/goog_cc_network_control.cc#562)).
+    #[test]
+    fn logs_remote_estimate_with_new_update_time() {
+        let event_log = Arc::new(RecordingRtcEventLog::default());
+        let mut controller = create_controller_with_event_log(event_log.clone());
+        let estimate = NetworkStateEstimate {
+            update_time: Timestamp::from_seconds(1),
+            link_capacity_lower: DataRate::from_kilobits_per_sec(50),
+            link_capacity_upper: DataRate::from_kilobits_per_sec(100),
+            ..Default::default()
+        };
+        let event = RtcEvent::RemoteEstimate(RtcEventRemoteEstimate {
+            link_capacity_lower: estimate.link_capacity_lower,
+            link_capacity_upper: estimate.link_capacity_upper,
+        });
+
+        controller.on_network_state_estimate(estimate);
+        assert_eq!(event_log.take(), [event]);
+        controller.on_network_state_estimate(estimate);
+        assert_eq!(event_log.take(), []);
+        controller.on_network_state_estimate(NetworkStateEstimate {
+            update_time: Timestamp::from_seconds(2),
+            ..estimate
+        });
+        assert_eq!(event_log.take(), [event]);
+    }
+
+    /// The controller's components log to the event log of its config, also
+    /// those that a route change creates anew.
+    ///
+    /// After the route change, the controller probes, and 6s of feedback with a
+    /// delay that grows by 50ms per packet change the delay-based and the
+    /// send-side estimates.
+    #[test]
+    fn components_log_to_config_event_log_after_route_change() {
+        let event_log = Arc::new(RecordingRtcEventLog::default());
+        let mut controller = create_controller_with_event_log(event_log.clone());
+        let mut current_time = Timestamp::from_millis(123);
+        controller.on_network_availability(NetworkAvailability {
+            at_time: current_time,
+            network_available: true,
+        });
+        controller.on_network_route_change(create_route_change(
+            current_time,
+            Some(DataRate::from_kilobits_per_sec(200)),
+            None,
+            None,
+        ));
+        packet_transmission_and_feedback_block(&mut controller, 6000, 50, &mut current_time);
+
+        let events = event_log.take();
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, RtcEvent::ProbeClusterCreated(_))));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, RtcEvent::BweUpdateDelayBased(_))));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, RtcEvent::BweUpdateLossBased(_))));
     }
 }

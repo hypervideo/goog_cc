@@ -8,8 +8,11 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
+use std::sync::Arc;
+
 use crate::{
     api::{
+        rtc_event_log::{RtcEvent, RtcEventBweUpdateDelayBased, RtcEventLog},
         transport::{BandwidthUsage, NetworkStateEstimate, PacketResult, TransportPacketsFeedback},
         units::{DataRate, DataSize, TimeDelta, Timestamp},
     },
@@ -63,6 +66,8 @@ enum DelayDetector {
 }
 
 pub struct DelayBasedBwe {
+    event_log: Arc<dyn RtcEventLog>,
+
     // Alternatively, run two separate overuse detectors for audio and video,
     // and fall back to the audio one if we haven't seen a video packet in a
     // while.
@@ -99,12 +104,13 @@ impl DelayBasedBwe {
     #[cfg(test)]
     const FIXED_SSRC: u32 = 0;
 
-    pub fn new(field_trials: &FieldTrials) -> Self {
+    pub fn new(field_trials: &FieldTrials, event_log: Arc<dyn RtcEventLog>) -> Self {
         tracing::debug!(
             "Initialized DelayBasedBwe with separate audio overuse detection: {:?}",
             field_trials.separate_audio_packets
         );
         Self {
+            event_log,
             separate_audio: field_trials.separate_audio_packets.clone(),
             audio_packets_since_last_video: 0,
             last_video_packet_recv_time: Timestamp::minus_infinity(),
@@ -372,6 +378,12 @@ impl DelayBasedBwe {
                 self.prev_bitrate
             };
 
+            self.event_log
+                .log(RtcEvent::BweUpdateDelayBased(RtcEventBweUpdateDelayBased {
+                    bitrate_bps: bitrate.bps() as i32,
+                    detector_state,
+                }));
+
             self.prev_bitrate = bitrate;
             self.prev_state = detector_state;
         }
@@ -396,7 +408,10 @@ impl DelayBasedBwe {
 
 #[cfg(test)]
 mod test {
-    use crate::api::transport::{PacedPacketInfo, SentPacket};
+    use crate::api::{
+        rtc_event_log::{test::RecordingRtcEventLog, RtcEventLogNull},
+        transport::{PacedPacketInfo, SentPacket},
+    };
     use crate::{
         AcknowledgedBitrateEstimator, AcknowledgedBitrateEstimatorInterface, ProbeBitrateEstimator,
         RobustThroughputEstimatorSettings,
@@ -619,7 +634,7 @@ mod test {
             Self {
                 acknowledged_bitrate_estimator: AcknowledgedBitrateEstimator::create(&field_trials),
                 probe_bitrate_estimator: ProbeBitrateEstimator::default(),
-                bitrate_estimator: DelayBasedBwe::new(&field_trials),
+                bitrate_estimator: DelayBasedBwe::new(&field_trials, Arc::new(RtcEventLogNull)),
                 stream_generator: StreamGenerator::new(
                     1000000, // Capacity.
                     clock.us(),
@@ -1360,37 +1375,87 @@ mod test {
         }
     }
 
-    /// Feeds 60 packets, sent 10ms apart, whose delay grows by 2ms each, one
-    /// per feedback. Returns whether the delay detector reported overuse.
+    /// The feedback of packet `i`, of packets sent 10ms apart whose delay grows
+    /// by 2ms each.
+    fn growing_delay_feedback(i: i64) -> TransportPacketsFeedback {
+        let start = Timestamp::from_seconds(100);
+        let send_time = start + TimeDelta::from_millis(10 * i);
+        let receive_time = send_time + TimeDelta::from_millis(2 * i);
+        TransportPacketsFeedback {
+            feedback_time: receive_time,
+            packet_feedbacks: vec![PacketResult {
+                sent_packet: SentPacket {
+                    send_time,
+                    size: DataSize::from_bytes(MTU as _),
+                    sequence_number: i,
+                    ..Default::default()
+                },
+                receive_time,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Feeds 60 packets of [`growing_delay_feedback`], one per feedback.
+    /// Returns whether the delay detector reported overuse.
     fn detects_overuse_on_growing_delay(
         trendline_estimator_settings: TrendlineEstimatorSettings,
     ) -> bool {
-        let mut bwe = DelayBasedBwe::new(&FieldTrials {
-            trendline_estimator_settings,
-            ..Default::default()
-        });
-        let start = Timestamp::from_seconds(100);
-        (0..60).any(|i| {
-            let send_time = start + TimeDelta::from_millis(10 * i);
-            let receive_time = send_time + TimeDelta::from_millis(2 * i);
-            let msg = TransportPacketsFeedback {
-                feedback_time: receive_time,
-                packet_feedbacks: vec![PacketResult {
-                    sent_packet: SentPacket {
-                        send_time,
-                        size: DataSize::from_bytes(MTU as _),
-                        sequence_number: i,
-                        ..Default::default()
-                    },
-                    receive_time,
-                    ..Default::default()
-                }],
+        let mut bwe = DelayBasedBwe::new(
+            &FieldTrials {
+                trendline_estimator_settings,
                 ..Default::default()
-            };
-            bwe.incoming_packet_feedback_vector(&msg, None, None, None, false)
+            },
+            Arc::new(RtcEventLogNull),
+        );
+        (0..60).any(|i| {
+            bwe.incoming_packet_feedback_vector(&growing_delay_feedback(i), None, None, None, false)
                 .delay_detector_state
                 == BandwidthUsage::Overusing
         })
+    }
+
+    /// A feedback logs the delay-based estimate when it changes the estimate or
+    /// the detector state, as libwebrtc's `IncomingPacketFeedbackVector` does
+    /// ([`delay_based_bwe.cc#248`](https://webrtc.googlesource.com/src/+/3075edeba1/modules/congestion_controller/goog_cc/delay_based_bwe.cc#248)).
+    ///
+    /// An acknowledged rate of 300kbps gives AIMD a valid estimate, and the
+    /// growing delay of [`growing_delay_feedback`] makes the detector overuse.
+    #[test]
+    fn logs_delay_based_update_on_estimate_or_state_change() {
+        let event_log = Arc::new(RecordingRtcEventLog::default());
+        let mut bwe = DelayBasedBwe::new(&FieldTrials::default(), event_log.clone());
+        let acked_bitrate = Some(DataRate::from_kilobits_per_sec(300));
+        let (mut prev_bitrate, mut prev_state) = (DataRate::zero(), BandwidthUsage::Normal);
+        let (mut logged_bitrate_change, mut logged_overuse) = (false, false);
+        for i in 0..60 {
+            let feedback = growing_delay_feedback(i);
+            let result =
+                bwe.incoming_packet_feedback_vector(&feedback, acked_bitrate, None, None, false);
+            let state = result.delay_detector_state;
+            let bitrate_changed = result.updated && result.target_bitrate != prev_bitrate;
+            if bitrate_changed || state != prev_state {
+                if bitrate_changed {
+                    prev_bitrate = result.target_bitrate;
+                    logged_bitrate_change = true;
+                }
+                prev_state = state;
+                logged_overuse |= state == BandwidthUsage::Overusing;
+                assert_eq!(
+                    event_log.take(),
+                    [RtcEvent::BweUpdateDelayBased(RtcEventBweUpdateDelayBased {
+                        bitrate_bps: prev_bitrate.bps() as i32,
+                        detector_state: state,
+                    })],
+                    "packet {i}"
+                );
+            } else {
+                assert_eq!(event_log.take(), [], "packet {i}");
+            }
+        }
+        assert!(logged_bitrate_change);
+        assert!(logged_overuse);
     }
 
     /// The delay detectors keep the configured trendline settings when the

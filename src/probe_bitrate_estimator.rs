@@ -8,9 +8,13 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::api::{
+    rtc_event_log::{
+        ProbeFailureReason, RtcEvent, RtcEventLog, RtcEventLogNull, RtcEventProbeResultFailure,
+        RtcEventProbeResultSuccess,
+    },
     transport::{PacedPacketInfo, PacketResult},
     units::{DataRate, DataSize, TimeDelta, Timestamp},
 };
@@ -89,13 +93,19 @@ pub struct ProbeClusterObservation {
     pub result_rate: DataRate,
 }
 
-#[derive(Default)]
 pub struct ProbeBitrateEstimator {
     clusters: HashMap<i32, AggregatedCluster>,
     /// Latest per-cluster observation, kept in lockstep with `clusters` (erased
     /// together). Observational only; never read by the estimate path.
     cluster_observations: HashMap<i32, ProbeClusterObservation>,
+    event_log: Arc<dyn RtcEventLog>,
     estimated_data_rate: Option<DataRate>,
+}
+
+impl Default for ProbeBitrateEstimator {
+    fn default() -> Self {
+        Self::new(Arc::new(RtcEventLogNull))
+    }
 }
 
 impl ProbeBitrateEstimator {
@@ -128,6 +138,15 @@ impl ProbeBitrateEstimator {
     // The maximum time interval between first and the last probe on a cluster
     // on the sender side as well as the receive side.
     pub const MAX_PROBE_INTERVAL: TimeDelta = TimeDelta::from_seconds(1);
+
+    pub fn new(event_log: Arc<dyn RtcEventLog>) -> Self {
+        Self {
+            clusters: HashMap::new(),
+            cluster_observations: HashMap::new(),
+            event_log,
+            estimated_data_rate: None,
+        }
+    }
 
     // Should be called for every probe packet we receive feedback about.
     // Returns the estimated bitrate if the probe completes a valid cluster.
@@ -248,6 +267,11 @@ impl ProbeBitrateEstimator {
         {
             tracing::debug!("Probing unsuccessful, invalid send/receive interval [cluster id: {}] [send interval: {:?}] [receive interval: {:?}]",
                       cluster_id, send_interval, receive_interval);
+            self.event_log
+                .log(RtcEvent::ProbeResultFailure(RtcEventProbeResultFailure {
+                    id: cluster_id,
+                    failure_reason: ProbeFailureReason::InvalidSendReceiveInterval,
+                }));
             observation.status = ProbeClusterStatus::InvalidInterval;
             self.cluster_observations.insert(cluster_id, observation);
             return None;
@@ -283,6 +307,11 @@ impl ProbeBitrateEstimator {
         if ratio > Self::MAX_VALID_RATIO {
             tracing::debug!("Probing unsuccessful, receive/send ratio too high [cluster id: {}] [send: {:?}/{:?} = {:?}] [receive: {:?}/{:?} = {:?}] [ratio: {:?} > {:?}]",
                       cluster_id, send_size, send_interval, send_rate, receive_size, receive_interval, receive_rate, ratio, Self::MAX_VALID_RATIO);
+            self.event_log
+                .log(RtcEvent::ProbeResultFailure(RtcEventProbeResultFailure {
+                    id: cluster_id,
+                    failure_reason: ProbeFailureReason::InvalidSendReceiveRatio,
+                }));
             observation.status = ProbeClusterStatus::InvalidRatio;
             self.cluster_observations.insert(cluster_id, observation);
             return None;
@@ -301,6 +330,11 @@ impl ProbeBitrateEstimator {
             res = Self::TARGET_UTILIZATION_FRACTION * receive_rate;
             observation.status = ProbeClusterStatus::Backoff;
         }
+        self.event_log
+            .log(RtcEvent::ProbeResultSuccess(RtcEventProbeResultSuccess {
+                id: cluster_id,
+                bitrate_bps: res.bps() as i32,
+            }));
         observation.result_rate = res;
         self.cluster_observations.insert(cluster_id, observation);
         self.estimated_data_rate = Some(res);
@@ -335,6 +369,7 @@ impl ProbeBitrateEstimator {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::api::rtc_event_log::test::RecordingRtcEventLog;
     use approx::assert_relative_eq;
 
     const DEFAULT_MIN_PROBES: i64 = 5;
@@ -384,6 +419,55 @@ mod test {
             test.measured_data_rate.unwrap().bps_float(),
             800000.0,
             epsilon = 10.0
+        );
+    }
+
+    /// Each probe packet's feedback logs the result of its cluster once the
+    /// cluster has enough packets, as libwebrtc's `HandleProbeAndEstimateBitrate`
+    /// does
+    /// ([`probe_bitrate_estimator.cc#121`](https://webrtc.googlesource.com/src/+/3075edeba1/modules/congestion_controller/goog_cc/probe_bitrate_estimator.cc#121)).
+    ///
+    /// Each cluster needs 4 of its 5 packets. Cluster 1 succeeds at 800kbps on
+    /// its fourth and fifth packet. Cluster 2 is sent at one instant, and
+    /// cluster 3 arrives 10 times faster than it was sent.
+    #[test]
+    fn logs_probe_results() {
+        let event_log = Arc::new(RecordingRtcEventLog::default());
+        let mut test = TestProbeBitrateEstimator {
+            measured_data_rate: None,
+            probe_bitrate_estimator: ProbeBitrateEstimator::new(event_log.clone()),
+        };
+        let success = RtcEvent::ProbeResultSuccess(RtcEventProbeResultSuccess {
+            id: 1,
+            bitrate_bps: 800_000,
+        });
+        for i in 0..3 {
+            test.add_packet_feedback(1, 1000, 10 * i, 10 * i + 10, 5, 5000);
+        }
+        assert_eq!(event_log.take(), []);
+        test.add_packet_feedback(1, 1000, 30, 40, 5, 5000);
+        assert_eq!(event_log.take(), [success]);
+        test.add_packet_feedback(1, 1000, 40, 50, 5, 5000);
+        assert_eq!(event_log.take(), [success]);
+
+        for i in 0..4 {
+            test.add_packet_feedback(2, 1000, 100, 110 + 10 * i, 5, 5000);
+        }
+        for i in 0..4 {
+            test.add_packet_feedback(3, 1000, 200 + 10 * i, 210 + i, 5, 5000);
+        }
+        assert_eq!(
+            event_log.take(),
+            [
+                RtcEvent::ProbeResultFailure(RtcEventProbeResultFailure {
+                    id: 2,
+                    failure_reason: ProbeFailureReason::InvalidSendReceiveInterval,
+                }),
+                RtcEvent::ProbeResultFailure(RtcEventProbeResultFailure {
+                    id: 3,
+                    failure_reason: ProbeFailureReason::InvalidSendReceiveRatio,
+                }),
+            ]
         );
     }
 

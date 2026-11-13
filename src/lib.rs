@@ -21,9 +21,6 @@
 //! This was quite error-prone as many trials do not match the cooresponding field name.
 //! I decided to create a [FieldTrials](experiments::FieldTrials) struct to represent field trials in a type-safe way.
 //!
-//! **RtcEventLog has been removed.**
-//! The structured logs are cool, but have been removed for now to simplify the code.
-//!
 //! **RTC_LOG has been replaced with [tracing].**
 //! Use [tracing_subscriber](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/index.html) to enable and configure the logger.
 
@@ -68,7 +65,7 @@ use send_side_bandwidth_estimation::*;
 use trendline_estimator::*;
 
 // Selectively export the public API.
-pub use api::{network_control, transport, units};
+pub use api::{network_control, rtc_event_log, transport, units};
 pub use goog_cc_network_control::{GoogCcConfig, GoogCcNetworkController};
 pub use probe_bitrate_estimator::{
     ProbeBitrateEstimator, ProbeClusterObservation, ProbeClusterStatus,

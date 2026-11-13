@@ -8,8 +8,13 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
+use std::sync::Arc;
+
 use crate::{
-    api::units::{DataRate, DataSize, TimeDelta, Timestamp},
+    api::{
+        rtc_event_log::{RtcEvent, RtcEventAlrState, RtcEventLog, RtcEventLogNull},
+        units::{DataRate, DataSize, TimeDelta, Timestamp},
+    },
     experiments::AlrExperimentSettings,
     pacing::IntervalBudget,
 };
@@ -47,6 +52,7 @@ impl Default for AlrDetectorConfig {
 // estimate bandwidth.
 // Note: This class is not thread-safe.
 pub struct AlrDetector {
+    event_log: Arc<dyn RtcEventLog>,
     conf: AlrDetectorConfig,
 
     last_send_time: Option<Timestamp>,
@@ -57,13 +63,14 @@ pub struct AlrDetector {
 
 impl Default for AlrDetector {
     fn default() -> Self {
-        Self::new(AlrDetectorConfig::default())
+        Self::new(AlrDetectorConfig::default(), Arc::new(RtcEventLogNull))
     }
 }
 
 impl AlrDetector {
-    pub fn new(conf: AlrDetectorConfig) -> Self {
+    pub fn new(conf: AlrDetectorConfig, event_log: Arc<dyn RtcEventLog>) -> Self {
         Self {
+            event_log,
             conf,
             last_send_time: None,
             alr_budget: IntervalBudget::new(0, true),
@@ -87,6 +94,7 @@ impl AlrDetector {
 
         self.alr_budget.use_budget(bytes_sent.bytes() as usize);
         self.alr_budget.increase_budget(delta_time.ms());
+        let mut state_changed = false;
         if self.alr_budget.budget_ratio() > self.conf.start_budget_level_ratio
             && self.alr_started_time.is_none()
         {
@@ -94,10 +102,17 @@ impl AlrDetector {
             // environment's clock. Callers pass `send_time` on that clock, at
             // the time of the call.
             self.alr_started_time = Some(send_time);
+            state_changed = true;
         } else if self.alr_budget.budget_ratio() < self.conf.stop_budget_level_ratio
             && self.alr_started_time.is_some()
         {
+            state_changed = true;
             self.alr_started_time = None;
+        }
+        if state_changed {
+            self.event_log.log(RtcEvent::AlrState(RtcEventAlrState {
+                in_alr: self.alr_started_time.is_some(),
+            }));
         }
     }
 
@@ -121,6 +136,7 @@ impl AlrDetector {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::api::rtc_event_log::test::RecordingRtcEventLog;
 
     const ESTIMATED_BITRATE: DataRate = DataRate::from_bits_per_sec(300_000);
 
@@ -209,6 +225,40 @@ mod test {
             .is_none());
     }
 
+    /// The detector logs each entry into and exit from the application limited
+    /// region, as libwebrtc's `OnBytesSent` does
+    /// ([`alr_detector.cc#84`](https://webrtc.googlesource.com/src/+/3075edeba1/modules/congestion_controller/goog_cc/alr_detector.cc#84)).
+    ///
+    /// The traffic is that of [`alr_detection`].
+    #[test]
+    fn logs_alr_state_changes() {
+        let event_log = Arc::new(RecordingRtcEventLog::default());
+        let mut clock = Timestamp::from_seconds(1);
+        let mut alr_detector = AlrDetector::new(AlrDetectorConfig::default(), event_log.clone());
+        alr_detector.set_estimated_bitrate(ESTIMATED_BITRATE);
+
+        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut clock)
+            .for_time(TimeDelta::from_seconds(1))
+            .at_percent_of_estimated_bitrate(90);
+        assert_eq!(event_log.take(), []);
+
+        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut clock)
+            .for_time(TimeDelta::from_millis(1_500))
+            .at_percent_of_estimated_bitrate(20);
+        assert_eq!(
+            event_log.take(),
+            [RtcEvent::AlrState(RtcEventAlrState { in_alr: true })]
+        );
+
+        SimulateOutgoingTrafficIn::new(&mut alr_detector, &mut clock)
+            .for_time(TimeDelta::from_seconds(4))
+            .at_percent_of_estimated_bitrate(100);
+        assert_eq!(
+            event_log.take(),
+            [RtcEvent::AlrState(RtcEventAlrState { in_alr: false })]
+        );
+    }
+
     #[test]
     fn short_spike() {
         let mut clock = Timestamp::from_seconds(1);
@@ -287,7 +337,7 @@ mod test {
             stop_budget_level_ratio: -0.10,
         };
         let mut clock = Timestamp::from_seconds(1);
-        let mut alr_detector = AlrDetector::new(config);
+        let mut alr_detector = AlrDetector::new(config, Arc::new(RtcEventLogNull));
         alr_detector.set_estimated_bitrate(ESTIMATED_BITRATE);
 
         // Start in non-ALR state.
