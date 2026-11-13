@@ -10,11 +10,12 @@
  *  FEC and NACK added bitrate is handled outside class
  */
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 use crate::remote_bitrate_estimator::CONGESTION_CONTROLLER_MIN_BITRATE;
 use crate::{
     api::{
+        rtc_event_log::{RtcEvent, RtcEventBweUpdateLossBased, RtcEventLog, RtcEventLogNull},
         transport::{BandwidthUsage, SentPacket, TransportPacketsFeedback},
         units::{DataRate, TimeDelta, Timestamp},
     },
@@ -120,6 +121,7 @@ pub struct SendSideBandwidthEstimation {
 
     acknowledged_rate: Option<DataRate>,
     current_target: DataRate,
+    last_logged_target: DataRate,
     min_bitrate_configured: DataRate,
     max_bitrate_configured: DataRate,
     last_low_bitrate_log: Timestamp,
@@ -140,6 +142,7 @@ pub struct SendSideBandwidthEstimation {
     first_report_time: Timestamp,
     initially_lost_packets: i64,
     bitrate_at_2_seconds: DataRate,
+    event_log: Arc<dyn RtcEventLog>,
     last_rtc_event_log: Timestamp,
     low_loss_threshold: f32,
     high_loss_threshold: f32,
@@ -151,7 +154,7 @@ pub struct SendSideBandwidthEstimation {
 
 impl Default for SendSideBandwidthEstimation {
     fn default() -> Self {
-        Self::new(FieldTrials::default())
+        Self::new(FieldTrials::default(), Arc::new(RtcEventLogNull))
     }
 }
 
@@ -162,10 +165,11 @@ impl SendSideBandwidthEstimation {
     const LIMIT_NUM_PACKETS: i64 = 20;
     const DEFAULT_MAX_BITRATE: DataRate = DataRate::from_bits_per_sec(1000000000);
     const LOW_BITRATE_LOG_PERIOD: TimeDelta = TimeDelta::from_millis(10000);
+    const RTC_EVENT_LOG_PERIOD: TimeDelta = TimeDelta::from_millis(5000);
     // Expecting that RTCP feedback is sent uniformly within [0.5, 1.5]s intervals.
     const MAX_RTCP_FEEDBACK_INTERVAL: TimeDelta = TimeDelta::from_millis(5000);
 
-    pub fn new(field_trials: FieldTrials) -> Self {
+    pub fn new(field_trials: FieldTrials, event_log: Arc<dyn RtcEventLog>) -> Self {
         let mut low_loss_threshold = 0.02;
         let mut high_loss_threshold = 0.1;
         let mut bitrate_threshold_kbps = 0.0;
@@ -221,6 +225,7 @@ impl SendSideBandwidthEstimation {
             lost_packets_since_last_loss_update: 0,
             expected_packets_since_last_loss_update: 0,
             current_target: DataRate::zero(),
+            last_logged_target: DataRate::zero(),
             min_bitrate_configured: CONGESTION_CONTROLLER_MIN_BITRATE,
             max_bitrate_configured: Self::DEFAULT_MAX_BITRATE,
             last_low_bitrate_log: Timestamp::minus_infinity(),
@@ -236,6 +241,7 @@ impl SendSideBandwidthEstimation {
             first_report_time: Timestamp::minus_infinity(),
             initially_lost_packets: 0,
             bitrate_at_2_seconds: DataRate::zero(),
+            event_log,
             last_rtc_event_log: Timestamp::minus_infinity(),
             low_loss_threshold,
             high_loss_threshold,
@@ -616,6 +622,23 @@ impl SendSideBandwidthEstimation {
         }
     }
 
+    fn maybe_log_loss_based_event(&mut self, at_time: Timestamp) {
+        if self.current_target != self.last_logged_target
+            || self.last_fraction_loss != self.last_logged_fraction_loss
+            || at_time - self.last_rtc_event_log > Self::RTC_EVENT_LOG_PERIOD
+        {
+            self.event_log
+                .log(RtcEvent::BweUpdateLossBased(RtcEventBweUpdateLossBased {
+                    bitrate_bps: self.current_target.bps() as i32,
+                    fraction_loss: self.last_fraction_loss,
+                    total_packets: self.expected_packets_since_last_loss_update as i32,
+                }));
+            self.last_logged_fraction_loss = self.last_fraction_loss;
+            self.last_logged_target = self.current_target;
+            self.last_rtc_event_log = at_time;
+        }
+    }
+
     // Cap `bitrate` to [self.min_bitrate_configured, max_bitrate_configured_] and
     // set `current_bitrate_` to the capped value and updates the event log.
     fn update_target_bitrate(&mut self, mut new_bitrate: DataRate, at_time: Timestamp) {
@@ -625,6 +648,7 @@ impl SendSideBandwidthEstimation {
             new_bitrate = self.min_bitrate_configured;
         }
         self.current_target = new_bitrate;
+        self.maybe_log_loss_based_event(at_time);
     }
     // Applies lower and upper bounds to the current target rate.
     // TODO(srte): This seems to be called even when limits haven't changed, that
@@ -646,12 +670,14 @@ impl SendSideBandwidthEstimation {
 mod test {
     use super::*;
     use crate::{
-        api::{transport::PacketResult, units::DataSize},
+        api::{
+            rtc_event_log::test::RecordingRtcEventLog, transport::PacketResult, units::DataSize,
+        },
         LossBasedBweV2Config,
     };
 
     fn test_probing(use_delay_based: bool) {
-        let mut bwe = SendSideBandwidthEstimation::new(Default::default());
+        let mut bwe = SendSideBandwidthEstimation::default();
         let mut now_ms: i64 = 0;
         bwe.set_min_max_bitrate(
             DataRate::from_bits_per_sec(100000),
@@ -714,9 +740,13 @@ mod test {
         test_probing(true);
     }
 
+    /// Besides the estimate, this checks the events that libwebrtc's test
+    /// expects: one with only a bitrate, and one with a bitrate and a fraction
+    /// of lost packets.
     #[test]
     fn doesnt_reapply_bitrate_decrease_without_following_remb() {
-        let mut bwe = SendSideBandwidthEstimation::new(Default::default());
+        let event_log = Arc::new(RecordingRtcEventLog::default());
+        let mut bwe = SendSideBandwidthEstimation::new(FieldTrials::default(), event_log.clone());
         const MIN_BITRATE_BPS: i64 = 100000;
         const INITIAL_BITRATE_BPS: i64 = 1000000;
         let mut now_ms: i64 = 1000;
@@ -772,11 +802,56 @@ mod test {
         // The old loss rate should still be applied though.
         assert_eq!(FRACTION_LOSS, bwe.fraction_loss());
         assert_eq!(RTT_MS, bwe.round_trip_time().ms());
+
+        // The loss report resets the packets expected before it updates the
+        // estimate, so the second event counts none.
+        assert_eq!(
+            event_log.take(),
+            [
+                RtcEvent::BweUpdateLossBased(RtcEventBweUpdateLossBased {
+                    bitrate_bps: INITIAL_BITRATE_BPS as i32,
+                    fraction_loss: 0,
+                    total_packets: 0,
+                }),
+                RtcEvent::BweUpdateLossBased(RtcEventBweUpdateLossBased {
+                    bitrate_bps: last_bitrate_bps as i32,
+                    fraction_loss: FRACTION_LOSS,
+                    total_packets: 0,
+                }),
+            ]
+        );
+    }
+
+    /// An unchanged target is logged again once more than 5s have passed since
+    /// the last event, as libwebrtc's `MaybeLogLossBasedEvent` does
+    /// ([`send_side_bandwidth_estimation.cc#574`](https://webrtc.googlesource.com/src/+/3075edeba1/modules/congestion_controller/goog_cc/send_side_bandwidth_estimation.cc#574)).
+    ///
+    /// The packets expected since the last loss update count in the event.
+    #[test]
+    fn logs_unchanged_loss_based_update_after_5s() {
+        let event_log = Arc::new(RecordingRtcEventLog::default());
+        let mut bwe = SendSideBandwidthEstimation::new(FieldTrials::default(), event_log.clone());
+        let event = RtcEvent::BweUpdateLossBased(RtcEventBweUpdateLossBased {
+            bitrate_bps: 1_000_000,
+            fraction_loss: 0,
+            total_packets: 10,
+        });
+        bwe.update_packets_lost(0, 10, Timestamp::from_millis(1000));
+        bwe.set_send_bitrate(
+            DataRate::from_bits_per_sec(1_000_000),
+            Timestamp::from_millis(1000),
+        );
+        assert_eq!(event_log.take(), [event]);
+
+        bwe.update_estimate(Timestamp::from_millis(6000));
+        assert_eq!(event_log.take(), []);
+        bwe.update_estimate(Timestamp::from_millis(6001));
+        assert_eq!(event_log.take(), [event]);
     }
 
     #[test]
     fn setting_send_bitrate_overrides_delay_based_estimate() {
-        let mut bwe = SendSideBandwidthEstimation::new(Default::default());
+        let mut bwe = SendSideBandwidthEstimation::default();
         const MIN_BITRATE_BPS: i64 = 10000;
         const MAX_BITRATE_BPS: i64 = 10000000;
         const INITIAL_BITRATE_BPS: i64 = 300000;
@@ -828,7 +903,7 @@ mod test {
 
     #[test]
     fn fraction_loss_is_not_overflowed() {
-        let mut bwe = SendSideBandwidthEstimation::new(Default::default());
+        let mut bwe = SendSideBandwidthEstimation::default();
         const MIN_BITRATE_BPS: i64 = 100000;
         const INITIAL_BITRATE_BPS: i64 = 1000000;
         let mut now_ms: i64 = 1000;
@@ -857,7 +932,7 @@ mod test {
 
     #[test]
     fn rtt_is_above_limit_if_rtt_greater_than_limit() {
-        let mut bwe = SendSideBandwidthEstimation::new(Default::default());
+        let mut bwe = SendSideBandwidthEstimation::default();
         const MIN_BITRATE_BPS: i64 = 10000;
         const MAX_BITRATE_BPS: i64 = 10000000;
         const INITIAL_BITRATE_BPS: i64 = 300000;
@@ -879,7 +954,7 @@ mod test {
 
     #[test]
     fn rtt_is_below_limit_if_rtt_less_than_limit() {
-        let mut bwe = SendSideBandwidthEstimation::new(Default::default());
+        let mut bwe = SendSideBandwidthEstimation::default();
         const MIN_BITRATE_BPS: i64 = 10000;
         const MAX_BITRATE_BPS: i64 = 10000000;
         const INITIAL_BITRATE_BPS: i64 = 300000;
@@ -907,14 +982,17 @@ mod test {
     /// 500kbps.
     #[test]
     fn invalid_loss_based_bwe_v2_config_turns_it_off() {
-        let mut bwe = SendSideBandwidthEstimation::new(FieldTrials {
-            loss_based_bwe_v2: LossBasedBweV2Config {
-                enabled: true,
-                bw_rampup_upper_bound_factor: 1.0,
+        let mut bwe = SendSideBandwidthEstimation::new(
+            FieldTrials {
+                loss_based_bwe_v2: LossBasedBweV2Config {
+                    enabled: true,
+                    bw_rampup_upper_bound_factor: 1.0,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
-            ..Default::default()
-        });
+            Arc::new(RtcEventLogNull),
+        );
         let now = Timestamp::from_seconds(1);
         bwe.set_send_bitrate(DataRate::from_kilobits_per_sec(100), now);
         bwe.update_delay_based_estimate(now, DataRate::from_kilobits_per_sec(500));
@@ -941,10 +1019,13 @@ mod test {
     /// Sends at 1000kbps, limits the receiver to 300kbps and lifts the limit
     /// again. Returns the target rate after the limit is lifted.
     fn target_rate_after_lifted_receiver_limit(disable_receiver_limit_caps_only: bool) -> DataRate {
-        let mut bwe = SendSideBandwidthEstimation::new(FieldTrials {
-            disable_receiver_limit_caps_only,
-            ..Default::default()
-        });
+        let mut bwe = SendSideBandwidthEstimation::new(
+            FieldTrials {
+                disable_receiver_limit_caps_only,
+                ..Default::default()
+            },
+            Arc::new(RtcEventLogNull),
+        );
         let now = Timestamp::from_seconds(1);
         bwe.set_send_bitrate(DataRate::from_kilobits_per_sec(1000), now);
         bwe.update_receiver_estimate(now, DataRate::from_kilobits_per_sec(300));
