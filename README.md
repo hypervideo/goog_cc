@@ -29,8 +29,5 @@ The original implementation uses a string to represent field trials.
 This was quite error-prone as many trials do not match the cooresponding field name.
 I decided to create a [FieldTrials](experiments::FieldTrials) struct to represent field trials in a type-safe way.
 
-**RtcEventLog has been removed.**
-The structured logs are cool, but have been removed for now to simplify the code.
-
 **RTC_LOG has been replaced with [tracing].**
 Use [tracing_subscriber](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/index.html) to enable and configure the logger.

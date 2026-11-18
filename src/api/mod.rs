@@ -1,6 +1,8 @@
 /// A generic congestion control interface: [NetworkControllerInterface](network_control::NetworkControllerInterface).
 pub mod network_control;
 
+pub mod rtc_event_log;
+
 /// Network structs and types.
 pub mod transport;
 

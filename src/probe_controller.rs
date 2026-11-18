@@ -8,10 +8,13 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
+use std::sync::Arc;
+
 use crate::{
     api::{
+        rtc_event_log::{RtcEvent, RtcEventLog, RtcEventLogNull, RtcEventProbeClusterCreated},
         transport::{NetworkAvailability, NetworkStateEstimate, ProbeClusterConfig},
-        units::{DataRate, TimeDelta, Timestamp},
+        units::{DataRate, DataSize, TimeDelta, Timestamp},
     },
     experiments::FieldTrials,
 };
@@ -159,6 +162,7 @@ pub struct ProbeController {
     max_total_allocated_bitrate: DataRate,
 
     in_rapid_recovery_experiment: bool,
+    event_log: Arc<dyn RtcEventLog>,
     next_probe_cluster_id: i32,
 
     config: ProbeControllerConfig,
@@ -183,6 +187,7 @@ impl Default for ProbeController {
             bitrate_before_last_large_drop: DataRate::zero(),
             max_total_allocated_bitrate: DataRate::zero(),
             in_rapid_recovery_experiment: false,
+            event_log: Arc::new(RtcEventLogNull),
             next_probe_cluster_id: 1,
             config: ProbeControllerConfig::default(),
             repeated_initial_probing_enabled: false,
@@ -231,10 +236,11 @@ impl ProbeController {
     }
 
     /// Creates a controller with the probing configuration and the rapid
-    /// recovery experiment of `field_trials`.
-    pub fn from_field_trials(field_trials: &FieldTrials) -> Self {
+    /// recovery experiment of `field_trials`, which logs to `event_log`.
+    pub fn from_field_trials(field_trials: &FieldTrials, event_log: Arc<dyn RtcEventLog>) -> Self {
         Self {
             in_rapid_recovery_experiment: field_trials.rapid_recovery_experiment,
+            event_log,
             ..Self::new(field_trials.probing_configuration.clone())
         }
     }
@@ -747,6 +753,14 @@ impl ProbeController {
             }
         };
 
+        let min_data_size: DataSize = config.target_data_rate * config.target_duration;
+        self.event_log
+            .log(RtcEvent::ProbeClusterCreated(RtcEventProbeClusterCreated {
+                id: config.id,
+                bitrate_bps: config.target_data_rate.bps() as i32,
+                min_probes: config.target_probe_count as u32,
+                min_bytes: min_data_size.bytes() as u32,
+            }));
         config
     }
 }
@@ -754,6 +768,8 @@ impl ProbeController {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::api::rtc_event_log::test::RecordingRtcEventLog;
+
     const MIN_BITRATE: DataRate = DataRate::from_bits_per_sec(100);
     const START_BITRATE: DataRate = DataRate::from_bits_per_sec(300);
     const MAX_BITRATE: DataRate = DataRate::from_bits_per_sec(10000);
@@ -779,6 +795,49 @@ mod test {
 
         let probes = probe_controller.set_bitrates(MIN_BITRATE, START_BITRATE, MAX_BITRATE, clock);
         assert!(probes.len() >= 2);
+    }
+
+    /// Each probe cluster is logged as the controller creates it, with its
+    /// minimum probe count and the bytes of its duration at its rate, as
+    /// libwebrtc's `CreateProbeClusterConfig` does
+    /// ([`probe_controller.cc#541`](https://webrtc.googlesource.com/src/+/3075edeba1/modules/congestion_controller/goog_cc/probe_controller.cc#541)).
+    ///
+    /// The initial probes are 3 and 6 times the start rate of 1Mbps, for the
+    /// default 15ms and at least 5 packets each.
+    #[test]
+    fn logs_probe_cluster_created() {
+        let event_log = Arc::new(RecordingRtcEventLog::default());
+        let mut probe_controller =
+            ProbeController::from_field_trials(&FieldTrials::default(), event_log.clone());
+        probe_controller.on_network_availability(NetworkAvailability {
+            network_available: true,
+            ..Default::default()
+        });
+        let probes = probe_controller.set_bitrates(
+            DataRate::from_kilobits_per_sec(100),
+            DataRate::from_kilobits_per_sec(1000),
+            DataRate::from_kilobits_per_sec(10000),
+            Timestamp::zero(),
+        );
+
+        assert_eq!(probes.len(), 2);
+        assert_eq!(
+            event_log.take(),
+            [
+                RtcEvent::ProbeClusterCreated(RtcEventProbeClusterCreated {
+                    id: 1,
+                    bitrate_bps: 3_000_000,
+                    min_probes: 5,
+                    min_bytes: 5625,
+                }),
+                RtcEvent::ProbeClusterCreated(RtcEventProbeClusterCreated {
+                    id: 2,
+                    bitrate_bps: 6_000_000,
+                    min_probes: 5,
+                    min_bytes: 11250,
+                }),
+            ]
+        );
     }
 
     #[test]
@@ -1538,10 +1597,13 @@ mod test {
     #[test]
     fn rapid_recovery_requests_probe_outside_alr() {
         let mut clock = Timestamp::zero();
-        let mut probe_controller = ProbeController::from_field_trials(&FieldTrials {
-            rapid_recovery_experiment: true,
-            ..Default::default()
-        });
+        let mut probe_controller = ProbeController::from_field_trials(
+            &FieldTrials {
+                rapid_recovery_experiment: true,
+                ..Default::default()
+            },
+            Arc::new(RtcEventLogNull),
+        );
         assert!(probe_controller
             .on_network_availability(NetworkAvailability {
                 network_available: true,
